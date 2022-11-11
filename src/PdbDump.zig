@@ -30,7 +30,10 @@ pub fn deinit(self: *PdbDump) void {
 }
 
 pub fn printHeaders(self: PdbDump, writer: anytype) !void {
-    const super_block = @ptrCast(*align(1) const pdb.SuperBlock, self.data[0..@sizeOf(pdb.SuperBlock)]).*;
+    const super_block = self.getMsfSuperBlock() orelse {
+        log.err("file too short", .{});
+        return error.InvalidPdb;
+    };
 
     if (!mem.eql(u8, &super_block.FileMagic, pdb.SuperBlock.file_magic)) {
         log.err("invalid PDB magic: expected {s} but got {s}", .{
@@ -55,4 +58,11 @@ pub fn printHeaders(self: PdbDump, writer: anytype) !void {
         const block = self.data[count * super_block.BlockSize ..][0..super_block.BlockSize];
         _ = block;
     }
+}
+
+fn getMsfSuperBlock(self: PdbDump) ?pdb.SuperBlock {
+    const size = @sizeOf(pdb.SuperBlock);
+    if (self.data.len < size) return null;
+    const super_block = @ptrCast(*align(1) const pdb.SuperBlock, self.data[0..size]).*;
+    return super_block;
 }
