@@ -62,7 +62,7 @@ pub fn printHeaders(self: PdbDump, writer: anytype) !void {
     var fb_map_it = self.getMsfFreeBlockMapIterator();
     while (fb_map_it.next()) |block| {
         const index = (fb_map_it.count - 1) * super_block.BlockSize + super_block.FreeBlockMapBlock;
-        try writer.print("FreeBlockMap #{x}\n", .{index});
+        try writer.print("FreeBlockMap #0x{x}\n", .{index});
 
         var state: enum { free, taken } = if (@truncate(u1, block[0]) == 1) .free else .taken;
         var start_block_index: u32 = 0;
@@ -71,17 +71,17 @@ pub fn printHeaders(self: PdbDump, writer: anytype) !void {
         while (bit_count < total_block_count) : (bit_count += 1) {
             const block_index = bit_count;
             const byte_index = @divTrunc(bit_count, 8);
-            const shift = @intCast(u3, 7 - @mod(bit_count, 8));
+            const shift = @intCast(u3, @mod(bit_count, 8));
             const free = @truncate(u1, block[byte_index] >> shift) == 1;
 
             switch (state) {
                 .free => if (!free) {
-                    try writer.print("  #{x:0>4} - {x:0>4} free\n", .{ start_block_index, block_index - 1 });
+                    try writer.print("  #{x: >4} - {x: >4} free\n", .{ start_block_index, block_index - 1 });
                     start_block_index = block_index;
                     state = .taken;
                 },
                 .taken => if (free) {
-                    try writer.print("  #{x:0>4} - {x:0>4} taken\n", .{ start_block_index, block_index - 1 });
+                    try writer.print("  #{x: >4} - {x: >4} taken\n", .{ start_block_index, block_index - 1 });
                     start_block_index = block_index;
                     state = .free;
                 },
@@ -89,7 +89,7 @@ pub fn printHeaders(self: PdbDump, writer: anytype) !void {
         }
 
         if (start_block_index < total_block_count - 1) {
-            try writer.print("  #{x:0>4} - {x:0>4} {s}\n", .{
+            try writer.print("  #{x: >4} - {x: >4} {s}\n", .{
                 start_block_index, total_block_count - 1,
                 switch (state) {
                     .free => "free",
@@ -98,10 +98,37 @@ pub fn printHeaders(self: PdbDump, writer: anytype) !void {
             });
         }
     }
+
+    try writer.writeByte('\n');
+
+    const stream_dir = try self.getStreamDirectory();
+    try writer.writeAll("StreamDirectory\n");
+
+    const num_streams = try stream_dir.getNumStreams();
+    try writer.print("  {s: <16} {x}\n", .{ "NumStreams", num_streams });
+
+    const stream_sizes = try stream_dir.getStreamSizes();
+    try writer.print("  {s: <16} ", .{"StreamSizes"});
+    for (stream_sizes) |size| {
+        try writer.print("{x} ", .{size});
+    }
+    try writer.writeByte('\n');
+
+    try writer.print("  {s: <16} ", .{"StreamBlocks"});
+    var i: usize = 0;
+    while (i < num_streams) : (i += 1) {
+        const stream = try stream_dir.getMsfStreamAt(i);
+        try writer.writeByte('\n');
+        try writer.print("    #{x}: ", .{i});
+        for (stream.blocks) |block| {
+            try writer.print("{x} ", .{block});
+        }
+    }
+    try writer.writeByte('\n');
 }
 
 fn getMsfSuperBlock(self: *const PdbDump) *align(1) const pdb.SuperBlock {
-    return @ptrCast(*align(1) const pdb.SuperBlock, self.data[0..@sizeOf(pdb.SuperBlock)]);
+    return @ptrCast(*align(1) const pdb.SuperBlock, self.data.ptr);
 }
 
 const Block = []const u8;
@@ -122,3 +149,105 @@ const FreeBlockMapIterator = struct {
 fn getMsfFreeBlockMapIterator(self: *const PdbDump) FreeBlockMapIterator {
     return .{ .self = self };
 }
+
+const StreamDirectory = struct {
+    stream: MsfStream,
+
+    const invalid_stream: u32 = @bitCast(u32, @as(i32, -1));
+
+    fn getNumStreams(dir: StreamDirectory) !u32 {
+        return dir.stream.read(u32, 0);
+    }
+
+    fn getStreamSizes(dir: StreamDirectory) ![]align(1) const u32 {
+        const num_streams = try dir.getNumStreams();
+        const raw_stream_sizes = try dir.stream.bytes(@sizeOf(u32), @sizeOf(u32) * num_streams);
+        return @ptrCast([*]align(1) const u32, raw_stream_sizes.ptr)[0..num_streams];
+    }
+
+    fn getMsfStreamAt(dir: StreamDirectory, index: usize) !MsfStream {
+        const num_streams = try dir.getNumStreams();
+        if (index >= num_streams) return error.EndOfStream;
+
+        const block_size = dir.stream.ctx.getMsfSuperBlock().BlockSize;
+        const stream_sizes = try dir.getStreamSizes();
+        var stream_size = stream_sizes[index];
+        if (stream_size == invalid_stream) stream_size = 0;
+        const num_blocks = ceil(u32, stream_size, block_size);
+
+        const total_prev_num_blocks = blk: {
+            var sum: u32 = 0;
+            var i: usize = 0;
+            while (i < index) : (i += 1) {
+                var prev_size = stream_sizes[i];
+                if (prev_size == invalid_stream) prev_size = 0;
+                sum += ceil(u32, prev_size, block_size);
+            }
+            break :blk sum;
+        };
+
+        const pos = @sizeOf(u32) * (stream_sizes.len + 1 + total_prev_num_blocks);
+        const raw_bytes = try dir.stream.bytes(pos, num_blocks * @sizeOf(u32));
+        const blocks = @ptrCast([*]align(1) const u32, raw_bytes.ptr)[0..num_blocks];
+
+        return MsfStream{ .ctx = dir.stream.ctx, .blocks = blocks };
+    }
+};
+
+inline fn ceil(comptime T: type, num: T, div: T) T {
+    return @divTrunc(num, div) + @boolToInt(@rem(num, div) > 0);
+}
+
+fn getStreamDirectory(self: *const PdbDump) !StreamDirectory {
+    const super_block = self.getMsfSuperBlock();
+    const pos = super_block.BlockMapAddr * super_block.BlockSize;
+    const num = ceil(u32, super_block.NumDirectoryBytes, super_block.BlockSize);
+    const blocks = @ptrCast([*]align(1) const u32, self.data.ptr + pos)[0..num];
+    const stream = MsfStream{ .ctx = self, .blocks = blocks };
+    return StreamDirectory{ .stream = stream };
+}
+
+const MsfStream = struct {
+    ctx: *const PdbDump,
+    blocks: []align(1) const u32,
+
+    const max_block_size: u32 = 0x1000;
+
+    fn bytes(stream: MsfStream, pos: usize, len: usize) ![]const u8 {
+        const super_block = stream.ctx.getMsfSuperBlock();
+
+        if (pos + len > stream.blocks.len * super_block.BlockSize) {
+            return error.EndOfStream;
+        }
+
+        // Hone in on the block(s) containing T and stitch together
+        // two subsequent blocks.
+        const index = @divTrunc(pos, super_block.BlockSize);
+        var buffer: [2 * max_block_size]u8 = undefined;
+        {
+            const abs_pos = stream.blocks[index] * super_block.BlockSize;
+            mem.copy(u8, &buffer, stream.ctx.data[abs_pos..][0..super_block.BlockSize]);
+        }
+        if (index < stream.blocks.len - 1) {
+            const abs_pos = stream.blocks[index + 1] * super_block.BlockSize;
+            mem.copy(u8, buffer[super_block.BlockSize..], stream.ctx.data[abs_pos..][0..super_block.BlockSize]);
+        }
+        const rel_pos = @rem(pos, super_block.BlockSize);
+
+        return buffer[rel_pos..][0..len];
+    }
+
+    fn read(stream: MsfStream, comptime T: type, pos: usize) !T {
+        switch (@typeInfo(T)) {
+            .Int => {
+                const raw_bytes = try stream.bytes(pos, @sizeOf(T));
+                return mem.readIntLittle(T, raw_bytes[0..@sizeOf(T)]);
+            },
+            .Struct => {
+                const raw_bytes = try stream.bytes(pos, @sizeOf(T));
+                return @ptrCast(*const T, raw_bytes).*;
+            },
+            else => @compileError("TODO unhandled"),
+        }
+    }
+};
