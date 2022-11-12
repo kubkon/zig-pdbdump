@@ -108,7 +108,8 @@ pub fn printHeaders(self: *PdbDump, writer: anytype) !void {
     const num_streams = try stream_dir.getNumStreams();
     try writer.print("  {s: <16} {x}\n", .{ "NumStreams", num_streams });
 
-    const stream_sizes = try stream_dir.getStreamSizes();
+    var stream_sizes_buffer: [2 * 0x1000]u8 = undefined;
+    const stream_sizes = try stream_dir.getStreamSizes(&stream_sizes_buffer);
     try writer.print("  {s: <16} ", .{"StreamSizes"});
     for (stream_sizes) |size| {
         try writer.print("{x} ", .{size});
@@ -200,10 +201,9 @@ const StreamDirectory = struct {
         return dir.stream.read(u32, 0);
     }
 
-    fn getStreamSizes(dir: StreamDirectory) ![]align(1) const u32 {
+    fn getStreamSizes(dir: StreamDirectory, buffer: []u8) ![]align(1) const u32 {
         const num_streams = try dir.getNumStreams();
-        var buffer: [2 * 0x1000]u8 = undefined;
-        const raw_stream_sizes = try dir.stream.bytes(@sizeOf(u32), @sizeOf(u32) * num_streams, &buffer);
+        const raw_stream_sizes = try dir.stream.bytes(@sizeOf(u32), @sizeOf(u32) * num_streams, buffer);
         return @ptrCast([*]align(1) const u32, raw_stream_sizes.ptr)[0..num_streams];
     }
 
@@ -212,7 +212,8 @@ const StreamDirectory = struct {
         if (index >= num_streams) return error.EndOfStream;
 
         const block_size = dir.stream.ctx.getMsfSuperBlock().BlockSize;
-        const stream_sizes = try dir.getStreamSizes();
+        var stream_sizes_buffer: [2 * 0x1000]u8 = undefined;
+        const stream_sizes = try dir.getStreamSizes(&stream_sizes_buffer);
         var stream_size = stream_sizes[index];
         if (stream_size == invalid_stream) stream_size = 0;
         const num_blocks = ceil(u32, stream_size, block_size);
@@ -266,20 +267,21 @@ const MsfStream = struct {
 
         // Hone in on the block(s) containing T and stitch together
         // N subsequent blocks.
-        var start = @rem(pos, super_block.BlockSize);
+        var out = buffer;
         var index = @divTrunc(pos, super_block.BlockSize);
-        var leftover = len;
+        var init_pos = @rem(pos, super_block.BlockSize) + stream.blocks[index] * super_block.BlockSize;
+        const init_len = @min(len, super_block.BlockSize - @rem(pos, super_block.BlockSize));
+        mem.copy(u8, out, stream.ctx.data[init_pos..][0..init_len]);
+        out = out[init_len..];
+
+        var leftover = len - init_len;
         while (leftover > 0) {
-            const abs_pos = stream.blocks[index] * super_block.BlockSize + start;
-            const copy_len = @min(leftover, super_block.BlockSize - start);
-            mem.copy(
-                u8,
-                buffer[super_block.BlockSize * index ..],
-                stream.ctx.data[abs_pos..][0..copy_len],
-            );
-            leftover -= copy_len;
             index += 1;
-            start = 0;
+            const next_pos = stream.blocks[index] * super_block.BlockSize;
+            const copy_len = @min(leftover, super_block.BlockSize);
+            mem.copy(u8, out, stream.ctx.data[next_pos..][0..copy_len]);
+            out = out[copy_len..];
+            leftover -= copy_len;
         }
 
         return buffer[0..len];
