@@ -272,8 +272,7 @@ const MsfStream = struct {
     }
 
     fn blocks(stream: MsfStream) []align(1) const u32 {
-        const super_block = stream.ctx.getMsfSuperBlock();
-        const num = ceil(usize, stream.buffer.len, super_block.BlockSize);
+        const num = @divExact(stream.buffer.len, @sizeOf(u32));
         return @ptrCast([*]align(1) const u32, stream.buffer.ptr)[0..num];
     }
 
