@@ -30,7 +30,7 @@ pub fn deinit(self: *PdbDump) void {
     self.gpa.free(self.data);
 }
 
-pub fn printHeaders(self: PdbDump, writer: anytype) !void {
+pub fn printHeaders(self: *PdbDump, writer: anytype) !void {
     // TODO triggers no struct layout assert
     // if (self.data.len < @sizeOf(pdb.SuperBlock)) {
     if (self.data.len < 56) {
@@ -116,9 +116,11 @@ pub fn printHeaders(self: PdbDump, writer: anytype) !void {
     try writer.writeByte('\n');
 
     try writer.print("  {s: <16} ", .{"StreamBlocks"});
+
+    var buffer: [2 * 0x1000]u8 = undefined;
     var i: usize = 0;
     while (i < num_streams) : (i += 1) {
-        const stream = try stream_dir.getMsfStreamAt(i);
+        const stream = try stream_dir.getMsfStreamAt(i, &buffer);
         try writer.writeByte('\n');
         try writer.print("    #{x}: ", .{i});
         for (stream.blocks) |block| {
@@ -128,7 +130,7 @@ pub fn printHeaders(self: PdbDump, writer: anytype) !void {
     try writer.writeByte('\n');
     try writer.writeByte('\n');
 
-    if (stream_dir.getMsfStreamAt(1)) |pdb_stream| {
+    if (stream_dir.getMsfStreamAt(1, &buffer)) |pdb_stream| {
         try writer.writeAll("PDB Info Stream #1\n");
         // PDBStream is at index #1
         const header = try pdb_stream.read(pdb.PdbStreamHeader, 0);
@@ -148,6 +150,18 @@ pub fn printHeaders(self: PdbDump, writer: anytype) !void {
 
             try writer.writeByte('\n');
         }
+
+        const strtab_len = try pdb_stream.read(u32, @sizeOf(pdb.PdbStreamHeader));
+        const strtab = try self.gpa.alloc(u8, strtab_len);
+        defer self.gpa.free(strtab);
+        _ = try pdb_stream.bytes(@sizeOf(pdb.PdbStreamHeader) + @sizeOf(u32), strtab_len, strtab);
+        log.warn("{s}", .{std.fmt.fmtSliceEscapeLower(strtab)});
+
+        const map_len = try pdb_stream.read(
+            u32,
+            @sizeOf(pdb.PdbStreamHeader) + @sizeOf(u32) + strtab_len,
+        );
+        log.warn("{x}", .{map_len});
     } else |err| switch (err) {
         error.EndOfStream => try writer.writeAll("No PDB Info Stream found.\n"),
         else => |e| return e,
@@ -188,11 +202,12 @@ const StreamDirectory = struct {
 
     fn getStreamSizes(dir: StreamDirectory) ![]align(1) const u32 {
         const num_streams = try dir.getNumStreams();
-        const raw_stream_sizes = try dir.stream.bytes(@sizeOf(u32), @sizeOf(u32) * num_streams);
+        var buffer: [2 * 0x1000]u8 = undefined;
+        const raw_stream_sizes = try dir.stream.bytes(@sizeOf(u32), @sizeOf(u32) * num_streams, &buffer);
         return @ptrCast([*]align(1) const u32, raw_stream_sizes.ptr)[0..num_streams];
     }
 
-    fn getMsfStreamAt(dir: StreamDirectory, index: usize) !MsfStream {
+    fn getMsfStreamAt(dir: StreamDirectory, index: usize, buffer: []u8) !MsfStream {
         const num_streams = try dir.getNumStreams();
         if (index >= num_streams) return error.EndOfStream;
 
@@ -214,7 +229,7 @@ const StreamDirectory = struct {
         };
 
         const pos = @sizeOf(u32) * (stream_sizes.len + 1 + total_prev_num_blocks);
-        const raw_bytes = try dir.stream.bytes(pos, num_blocks * @sizeOf(u32));
+        const raw_bytes = try dir.stream.bytes(pos, num_blocks * @sizeOf(u32), buffer);
         const blocks = @ptrCast([*]align(1) const u32, raw_bytes.ptr)[0..num_blocks];
 
         return MsfStream{ .ctx = dir.stream.ctx, .blocks = blocks };
@@ -238,50 +253,47 @@ const MsfStream = struct {
     ctx: *const PdbDump,
     blocks: []align(1) const u32,
 
-    const max_block_size: u32 = 0x1000;
-
-    fn bytes(stream: MsfStream, pos: usize, len: usize) ![]const u8 {
+    fn bytes(stream: MsfStream, pos: usize, len: usize, buffer: []u8) ![]const u8 {
         const super_block = stream.ctx.getMsfSuperBlock();
 
-        if (pos + len > stream.blocks.len * super_block.BlockSize) {
+        if (pos + len >= stream.blocks.len * super_block.BlockSize) {
             return error.EndOfStream;
         }
 
-        if (len <= 2 * max_block_size) {
-
-            // Hone in on the block(s) containing T and stitch together
-            // two subsequent blocks.
-            const index = @divTrunc(pos, super_block.BlockSize);
-            var buffer: [2 * max_block_size]u8 = undefined;
-            {
-                const abs_pos = stream.blocks[index] * super_block.BlockSize;
-                mem.copy(u8, &buffer, stream.ctx.data[abs_pos..][0..super_block.BlockSize]);
-            }
-            if (index < stream.blocks.len - 1) {
-                const abs_pos = stream.blocks[index + 1] * super_block.BlockSize;
-                mem.copy(
-                    u8,
-                    buffer[super_block.BlockSize..],
-                    stream.ctx.data[abs_pos..][0..super_block.BlockSize],
-                );
-            }
-            const rel_pos = @rem(pos, super_block.BlockSize);
-
-            return buffer[rel_pos..][0..len];
-        } else {
-            log.err("TODO stitching of very large blocks", .{});
-            return error.TODOLargeBlocks;
+        if (len > buffer.len) {
+            return error.BufferTooShort;
         }
+
+        // Hone in on the block(s) containing T and stitch together
+        // N subsequent blocks.
+        var start = @rem(pos, super_block.BlockSize);
+        var index = @divTrunc(pos, super_block.BlockSize);
+        var leftover = len;
+        while (leftover > 0) {
+            const abs_pos = stream.blocks[index] * super_block.BlockSize + start;
+            const copy_len = @min(leftover, super_block.BlockSize - start);
+            mem.copy(
+                u8,
+                buffer[super_block.BlockSize * index ..],
+                stream.ctx.data[abs_pos..][0..copy_len],
+            );
+            leftover -= copy_len;
+            index += 1;
+            start = 0;
+        }
+
+        return buffer[0..len];
     }
 
     fn read(stream: MsfStream, comptime T: type, pos: usize) !T {
+        var buffer: [@sizeOf(T)]u8 = undefined;
         switch (@typeInfo(T)) {
             .Int => {
-                const raw_bytes = try stream.bytes(pos, @sizeOf(T));
+                const raw_bytes = try stream.bytes(pos, @sizeOf(T), &buffer);
                 return mem.readIntLittle(T, raw_bytes[0..@sizeOf(T)]);
             },
             .Struct => {
-                const raw_bytes = try stream.bytes(pos, @sizeOf(T));
+                const raw_bytes = try stream.bytes(pos, @sizeOf(T), &buffer);
                 return @ptrCast(*align(1) const T, raw_bytes).*;
             },
             else => @compileError("TODO unhandled"),
