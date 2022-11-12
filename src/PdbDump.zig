@@ -289,16 +289,11 @@ const MsfStream = struct {
 
     fn read(stream: MsfStream, comptime T: type, pos: usize) !T {
         var buffer: [@sizeOf(T)]u8 = undefined;
-        switch (@typeInfo(T)) {
-            .Int => {
-                const raw_bytes = try stream.bytes(pos, @sizeOf(T), &buffer);
-                return mem.readIntLittle(T, raw_bytes[0..@sizeOf(T)]);
-            },
-            .Struct => {
-                const raw_bytes = try stream.bytes(pos, @sizeOf(T), &buffer);
-                return @ptrCast(*align(1) const T, raw_bytes).*;
-            },
+        const raw_bytes = try stream.bytes(pos, @sizeOf(T), &buffer);
+        return switch (@typeInfo(T)) {
+            .Int => mem.readIntLittle(T, raw_bytes[0..@sizeOf(T)]),
+            .Struct => @ptrCast(*align(1) const T, raw_bytes).*,
             else => @compileError("TODO unhandled"),
-        }
+        };
     }
 };
