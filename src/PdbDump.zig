@@ -5,9 +5,10 @@ const fs = std.fs;
 const io = std.io;
 const log = std.log;
 const mem = std.mem;
-const pdb = std.pdb;
 
 const Allocator = mem.Allocator;
+
+const pdb = @import("pdb.zig");
 
 gpa: Allocator,
 data: []const u8,
@@ -125,6 +126,32 @@ pub fn printHeaders(self: PdbDump, writer: anytype) !void {
         }
     }
     try writer.writeByte('\n');
+    try writer.writeByte('\n');
+
+    if (stream_dir.getMsfStreamAt(1)) |pdb_stream| {
+        try writer.writeAll("PDB Info Stream #1\n");
+        // PDBStream is at index #1
+        const header = try pdb_stream.read(pdb.PdbStreamHeader, 0);
+
+        inline for (@typeInfo(pdb.PdbStreamHeader).Struct.fields) |field| {
+            try writer.print("  {s: <16} ", .{field.name});
+
+            const value = @field(header, field.name);
+
+            if (comptime mem.eql(u8, field.name, "Version")) {
+                try writer.print("{s}", .{@tagName(value)});
+            } else if (comptime mem.eql(u8, field.name, "Guid")) {
+                try writer.print("{x}", .{std.fmt.fmtSliceHexLower(&value)});
+            } else {
+                try writer.print("{x}", .{value});
+            }
+
+            try writer.writeByte('\n');
+        }
+    } else |err| switch (err) {
+        error.EndOfStream => try writer.writeAll("No PDB Info Stream found.\n"),
+        else => |e| return e,
+    }
 }
 
 fn getMsfSuperBlock(self: *const PdbDump) *align(1) const pdb.SuperBlock {
@@ -220,21 +247,31 @@ const MsfStream = struct {
             return error.EndOfStream;
         }
 
-        // Hone in on the block(s) containing T and stitch together
-        // two subsequent blocks.
-        const index = @divTrunc(pos, super_block.BlockSize);
-        var buffer: [2 * max_block_size]u8 = undefined;
-        {
-            const abs_pos = stream.blocks[index] * super_block.BlockSize;
-            mem.copy(u8, &buffer, stream.ctx.data[abs_pos..][0..super_block.BlockSize]);
-        }
-        if (index < stream.blocks.len - 1) {
-            const abs_pos = stream.blocks[index + 1] * super_block.BlockSize;
-            mem.copy(u8, buffer[super_block.BlockSize..], stream.ctx.data[abs_pos..][0..super_block.BlockSize]);
-        }
-        const rel_pos = @rem(pos, super_block.BlockSize);
+        if (len <= 2 * max_block_size) {
 
-        return buffer[rel_pos..][0..len];
+            // Hone in on the block(s) containing T and stitch together
+            // two subsequent blocks.
+            const index = @divTrunc(pos, super_block.BlockSize);
+            var buffer: [2 * max_block_size]u8 = undefined;
+            {
+                const abs_pos = stream.blocks[index] * super_block.BlockSize;
+                mem.copy(u8, &buffer, stream.ctx.data[abs_pos..][0..super_block.BlockSize]);
+            }
+            if (index < stream.blocks.len - 1) {
+                const abs_pos = stream.blocks[index + 1] * super_block.BlockSize;
+                mem.copy(
+                    u8,
+                    buffer[super_block.BlockSize..],
+                    stream.ctx.data[abs_pos..][0..super_block.BlockSize],
+                );
+            }
+            const rel_pos = @rem(pos, super_block.BlockSize);
+
+            return buffer[rel_pos..][0..len];
+        } else {
+            log.err("TODO stitching of very large blocks", .{});
+            return error.TODOLargeBlocks;
+        }
     }
 
     fn read(stream: MsfStream, comptime T: type, pos: usize) !T {
@@ -245,7 +282,7 @@ const MsfStream = struct {
             },
             .Struct => {
                 const raw_bytes = try stream.bytes(pos, @sizeOf(T));
-                return @ptrCast(*const T, raw_bytes).*;
+                return @ptrCast(*align(1) const T, raw_bytes).*;
             },
             else => @compileError("TODO unhandled"),
         }
