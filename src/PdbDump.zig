@@ -138,7 +138,9 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
 
         try writer.writeAll("PDB Info Stream #1\n");
         // PDBStream is at index #1
-        const header = try pdb_stream.read(pdb.PdbStreamHeader, 0);
+        var pos: usize = 0;
+        const header = try pdb_stream.read(pdb.PdbStreamHeader, pos);
+        pos += @sizeOf(pdb.PdbStreamHeader);
 
         inline for (@typeInfo(pdb.PdbStreamHeader).Struct.fields) |field| {
             try writer.print("  {s: <16} ", .{field.name});
@@ -156,20 +158,70 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
             try writer.writeByte('\n');
         }
 
-        const strtab_len = try pdb_stream.read(u32, @sizeOf(pdb.PdbStreamHeader));
-        const strtab = try pdb_stream.bytesAlloc(
-            self.gpa,
-            @sizeOf(pdb.PdbStreamHeader) + @sizeOf(u32),
-            strtab_len,
-        );
+        const strtab_len = try pdb_stream.read(u32, pos);
+        pos += @sizeOf(u32);
+
+        const strtab = try pdb_stream.bytesAlloc(self.gpa, pos, strtab_len);
         defer self.gpa.free(strtab);
+        pos += strtab_len;
         log.warn("{s}", .{std.fmt.fmtSliceEscapeLower(strtab)});
 
-        const map_len = try pdb_stream.read(
-            u32,
-            @sizeOf(pdb.PdbStreamHeader) + @sizeOf(u32) + strtab_len,
-        );
+        const map_len = try pdb_stream.read(u32, pos);
+        pos += @sizeOf(u32);
         log.warn("{x}", .{map_len});
+
+        const map_capacity = try pdb_stream.read(u32, pos);
+        pos += @sizeOf(u32);
+        log.warn("{x}", .{map_capacity});
+
+        const present_word_count = try pdb_stream.read(u32, pos);
+        pos += @sizeOf(u32);
+        log.warn("{x}", .{present_word_count});
+
+        const present_words_bytes = try pdb_stream.bytesAlloc(
+            self.gpa,
+            pos,
+            present_word_count * @sizeOf((u32)),
+        );
+        defer self.gpa.free(present_words_bytes);
+        pos += present_word_count * @sizeOf(u32);
+        const present_words = @ptrCast(
+            [*]align(1) const u32,
+            present_words_bytes.ptr,
+        )[0..present_word_count];
+
+        for (present_words) |present, present_i| {
+            log.warn("  word {x}: 0b{b}", .{ present_i, present });
+        }
+
+        const deleted_word_count = try pdb_stream.read(u32, pos);
+        pos += @sizeOf(u32);
+        log.warn("{x}", .{deleted_word_count});
+
+        const deleted_words_bytes = try pdb_stream.bytesAlloc(
+            self.gpa,
+            pos,
+            deleted_word_count * @sizeOf((u32)),
+        );
+        defer self.gpa.free(deleted_words_bytes);
+        pos += deleted_word_count * @sizeOf(u32);
+        const deleted_words = @ptrCast(
+            [*]align(1) const u32,
+            deleted_words_bytes.ptr,
+        )[0..deleted_word_count];
+
+        for (deleted_words) |deleted, deleted_i| {
+            log.warn("  word {x}: 0b{b}", .{ deleted_i, deleted });
+        }
+
+        var bucket_count: usize = 0;
+        while (bucket_count < map_capacity) : (bucket_count += 1) {
+            const key = try pdb_stream.read(u32, pos);
+            const value = try pdb_stream.read(u32, pos + @sizeOf(u32));
+            pos += 2 * @sizeOf(u32);
+
+            log.warn("  key = {x}, value = {x}", .{ key, value });
+        }
     } else |err| switch (err) {
         error.EndOfStream => try writer.writeAll("No PDB Info Stream found.\n"),
         else => |e| return e,
