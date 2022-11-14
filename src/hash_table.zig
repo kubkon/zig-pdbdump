@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const log = std.log;
 
 const Allocator = std.mem.Allocator;
 const DynamicBitSetUnmanaged = std.bit_set.DynamicBitSetUnmanaged;
@@ -50,23 +51,29 @@ pub fn HashTable(comptime Value: type) type {
         pub fn read(gpa: Allocator, reader: anytype) !Self {
             const header = try reader.readStruct(Header);
 
-            var present = try readBitSet(u32, gpa, reader);
-            errdefer present.deinit(gpa);
-
-            var deleted = try readBitSet(u32, gpa, reader);
-            errdefer deleted.deinit(gpa);
-
             var self = Self{
                 .gpa = gpa,
                 .header = header,
-                .present = present,
-                .deleted = deleted,
             };
+
+            try readBitSet(u32, gpa, &self.present, reader);
+
+            if (self.present.count() != self.header.size) {
+                log.err("Present bit vector does not the match size of hash table", .{});
+                return error.InvalidHashMap;
+            }
+
+            try readBitSet(u32, gpa, &self.deleted, reader);
+
+            if (intersects(&self.present, &self.deleted)) {
+                log.err("Buckets marked as both valid and deleted", .{});
+                return error.InvalidHashMap;
+            }
+
             try self.buckets.resize(gpa, header.capacity);
 
-            var bucket_it = present.iterator(.{});
+            var bucket_it = self.present.iterator(.{});
             while (bucket_it.next()) |index| {
-                if (deleted.capacity() > 0) assert(!deleted.isSet(index)); // TODO convert to an error
                 self.buckets.items[index] = try reader.readStruct(Entry);
             }
 
@@ -75,10 +82,24 @@ pub fn HashTable(comptime Value: type) type {
     };
 }
 
-fn readBitSet(comptime Word: type, gpa: Allocator, reader: anytype) !DynamicBitSetUnmanaged {
+fn intersects(lhs: *const DynamicBitSetUnmanaged, rhs: *const DynamicBitSetUnmanaged) bool {
+    var lhs_it = lhs.iterator(.{});
+    var rhs_it = rhs.iterator(.{});
+
+    while (lhs_it.next()) |lhs_index| {
+        while (rhs_it.next()) |rhs_index| {
+            if (lhs_index == rhs_index) return true;
+            if (lhs_index > rhs_index) break;
+        } else return false;
+    }
+
+    return false;
+}
+
+fn readBitSet(comptime Word: type, gpa: Allocator, bitset: *DynamicBitSetUnmanaged, reader: anytype) !void {
     const num_words = try reader.readIntLittle(Word);
     const bit_length = num_words * @bitSizeOf(Word);
-    var bit_set = try DynamicBitSetUnmanaged.initEmpty(gpa, bit_length);
+    bitset.* = try DynamicBitSetUnmanaged.initEmpty(gpa, bit_length);
 
     var i: usize = 0;
     while (i < num_words) : (i += 1) {
@@ -86,10 +107,8 @@ fn readBitSet(comptime Word: type, gpa: Allocator, reader: anytype) !DynamicBitS
         var index: std.math.Log2Int(Word) = 0;
         while (index < @bitSizeOf(Word) - 1) : (index += 1) {
             if ((word & (@as(Word, 1) << index)) != 0) {
-                bit_set.set(index);
+                bitset.set(index);
             }
         }
     }
-
-    return bit_set;
 }

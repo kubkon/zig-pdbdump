@@ -261,7 +261,6 @@ const StreamDirectory = struct {
         const size = dir.getStreamSizes()[index];
 
         const buffer = try gpa.alloc(u8, size);
-        errdefer gpa.free(buffer);
 
         stitchBlocks(blocks, buffer, ctx);
 
@@ -280,7 +279,6 @@ fn getStreamDirectory(self: *const PdbDump) error{OutOfMemory}!StreamDirectory {
     const blocks = @ptrCast([*]align(1) const u32, self.data.ptr + pos)[0..num];
 
     const buffer = try self.gpa.alloc(u8, super_block.NumDirectoryBytes);
-    errdefer self.gpa.free(buffer);
 
     stitchBlocks(blocks, buffer, .{
         .data = self.data,
