@@ -9,7 +9,7 @@ const mem = std.mem;
 const pdb = @import("pdb.zig");
 
 const Allocator = mem.Allocator;
-const BitSet = @import("BitSet.zig");
+const HashTable = @import("hash_table.zig").HashTable;
 
 gpa: Allocator,
 data: []const u8,
@@ -167,34 +167,9 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
         pos += strtab_len;
         log.warn("{s}", .{std.fmt.fmtSliceEscapeLower(strtab)});
 
-        const map_len = try pdb_stream.read(u32, pos);
-        pos += @sizeOf(u32);
-        log.warn("size = {x}", .{map_len});
-
-        const map_capacity = try pdb_stream.read(u32, pos);
-        pos += @sizeOf(u32);
-        log.warn("capacity = {x}", .{map_capacity});
-
-        var present_bit_set = try readBitSet(pdb_stream, self.gpa, pos);
-        defer present_bit_set.deinit(self.gpa);
-        pos += (BitSet.numMasks(present_bit_set.bit_length) + 1) * @sizeOf(u32);
-
-        var deleted_bit_set = try readBitSet(pdb_stream, self.gpa, pos);
-        defer deleted_bit_set.deinit(self.gpa);
-        pos += (BitSet.numMasks(deleted_bit_set.bit_length) + 1) * @sizeOf(u32);
-
-        {
-            var present = present_bit_set.iterator(.{});
-            while (present.next()) |slot| {
-                if (deleted_bit_set.capacity() > 0) assert(!deleted_bit_set.isSet(slot));
-
-                const key = try pdb_stream.read(u32, pos);
-                const value = try pdb_stream.read(u32, pos + @sizeOf(u32));
-                pos += 2 * @sizeOf(u32);
-
-                log.warn("  slot #{x}: {x} => {x}", .{ slot, key, value });
-            }
-        }
+        var named_stream_map = try HashTable(u32).readFromMsfStream(pdb_stream, self.gpa, pos);
+        defer named_stream_map.deinit();
+        pos += named_stream_map.serializedSize();
 
         const features_raw = try pdb_stream.bytesAlloc(self.gpa, pos, pdb_stream.size - pos);
         defer self.gpa.free(features_raw);
@@ -298,12 +273,12 @@ fn getStreamDirectory(self: *const PdbDump) !StreamDirectory {
     return StreamDirectory{ .sizes = sizes, .stream = stream };
 }
 
-const MsfStream = struct {
+pub const MsfStream = struct {
     ctx: *const PdbDump,
     buffer: []const u8,
     size: usize,
 
-    fn deinit(stream: MsfStream, gpa: Allocator) void {
+    pub fn deinit(stream: MsfStream, gpa: Allocator) void {
         gpa.free(stream.buffer);
     }
 
@@ -312,12 +287,12 @@ const MsfStream = struct {
         return @ptrCast([*]align(1) const u32, stream.buffer.ptr)[0..num];
     }
 
-    fn bytesAlloc(stream: MsfStream, gpa: Allocator, pos: usize, len: usize) ![]const u8 {
+    pub fn bytesAlloc(stream: MsfStream, gpa: Allocator, pos: usize, len: usize) ![]const u8 {
         const buffer = try gpa.alloc(u8, len);
         return stream.bytes(pos, buffer);
     }
 
-    fn bytes(stream: MsfStream, pos: usize, buffer: []u8) ![]const u8 {
+    pub fn bytes(stream: MsfStream, pos: usize, buffer: []u8) ![]const u8 {
         if (pos + buffer.len > stream.size) return error.EndOfStream;
 
         const super_block = stream.ctx.getMsfSuperBlock();
@@ -345,7 +320,7 @@ const MsfStream = struct {
         return buffer;
     }
 
-    fn read(stream: MsfStream, comptime T: type, pos: usize) !T {
+    pub fn read(stream: MsfStream, comptime T: type, pos: usize) !T {
         var buffer: [@sizeOf(T)]u8 = undefined;
         const raw_bytes = try stream.bytes(pos, &buffer);
         return switch (@typeInfo(T)) {
@@ -355,19 +330,3 @@ const MsfStream = struct {
         };
     }
 };
-
-fn readBitSet(stream: MsfStream, gpa: Allocator, pos: usize) !BitSet {
-    const num_masks = try stream.read(u32, pos);
-    const raw_bytes = try stream.bytesAlloc(gpa, pos + @sizeOf(u32), num_masks * @sizeOf((u32)));
-    defer gpa.free(raw_bytes);
-
-    const bit_length = num_masks * @bitSizeOf(u32);
-    var bit_set = try BitSet.initEmpty(gpa, bit_length);
-
-    const masks = @ptrCast([*]align(1) const u32, raw_bytes.ptr)[0..num_masks];
-    for (masks) |mask, i| {
-        bit_set.masks[i] = mask;
-    }
-
-    return bit_set;
-}
