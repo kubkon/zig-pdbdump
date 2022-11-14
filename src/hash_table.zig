@@ -43,18 +43,14 @@ pub fn HashTable(comptime Value: type) type {
             return size;
         }
 
-        pub fn readFromMsfStream(stream: MsfStream, gpa: Allocator, pos: usize) !Self {
-            var curr = pos;
-            const header = try stream.read(Header, curr);
-            curr += @sizeOf(Header);
+        pub fn read(gpa: Allocator, reader: anytype) !Self {
+            const header = try reader.readStruct(Header);
 
-            var present = try readBitSet(stream, gpa, curr);
+            var present = try readBitSet(gpa, reader);
             errdefer present.deinit(gpa);
-            curr += (BitSet.numMasks(present.bit_length) + 1) * @sizeOf(u32);
 
-            var deleted = try readBitSet(stream, gpa, curr);
+            var deleted = try readBitSet(gpa, reader);
             errdefer deleted.deinit(gpa);
-            curr += (BitSet.numMasks(deleted.bit_length) + 1) * @sizeOf(u32);
 
             var self = Self{
                 .gpa = gpa,
@@ -67,11 +63,7 @@ pub fn HashTable(comptime Value: type) type {
             var bucket_it = present.iterator(.{});
             while (bucket_it.next()) |index| {
                 if (deleted.capacity() > 0) assert(!deleted.isSet(index)); // TODO convert to an error
-
-                var entry = try stream.read(Entry, curr);
-                curr += @sizeOf(Entry);
-
-                self.buckets.items[index] = entry;
+                self.buckets.items[index] = try reader.readStruct(Entry);
             }
 
             return self;
@@ -79,17 +71,14 @@ pub fn HashTable(comptime Value: type) type {
     };
 }
 
-fn readBitSet(stream: MsfStream, gpa: Allocator, pos: usize) !BitSet {
-    const num_masks = try stream.read(u32, pos);
-    const raw_bytes = try stream.bytesAlloc(gpa, pos + @sizeOf(u32), num_masks * @sizeOf((u32)));
-    defer gpa.free(raw_bytes);
-
+fn readBitSet(gpa: Allocator, reader: anytype) !BitSet {
+    const num_masks = try reader.readIntLittle(u32);
     const bit_length = num_masks * @bitSizeOf(u32);
     var bit_set = try BitSet.initEmpty(gpa, bit_length);
 
-    const masks = @ptrCast([*]align(1) const u32, raw_bytes.ptr)[0..num_masks];
-    for (masks) |mask, i| {
-        bit_set.masks[i] = mask;
+    var i: usize = 0;
+    while (i < num_masks) : (i += 1) {
+        bit_set.masks[i] = try reader.readIntLittle(u32);
     }
 
     return bit_set;

@@ -102,46 +102,50 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
     }
 
     try writer.writeByte('\n');
+    try writer.writeAll("StreamDirectory\n");
 
     const stream_dir = try self.getStreamDirectory();
     defer stream_dir.deinit(self.gpa);
 
-    try writer.writeAll("StreamDirectory\n");
-
     const num_streams = stream_dir.getNumStreams();
-    try writer.print("  {s: <16} {x}\n", .{ "NumStreams", num_streams });
-
     const stream_sizes = stream_dir.getStreamSizes();
+
+    try writer.print("  {s: <16} {x}\n", .{ "NumStreams", num_streams });
     try writer.print("  {s: <16} ", .{"StreamSizes"});
     for (stream_sizes) |size| {
         try writer.print("{x} ", .{size});
     }
     try writer.writeByte('\n');
-
     try writer.print("  {s: <16} ", .{"StreamBlocks"});
 
     var i: usize = 0;
     while (i < num_streams) : (i += 1) {
-        const stream = try stream_dir.getMsfStreamAt(self.gpa, i);
-        defer stream.deinit(self.gpa);
-
         try writer.writeByte('\n');
         try writer.print("    #{x}: ", .{i});
-        for (stream.blocks()) |block| {
+        const blocks = stream_dir.getStreamBlocks(i, .{
+            .data = self.data,
+            .block_size = super_block.BlockSize,
+        }).?;
+        for (blocks) |block| {
             try writer.print("{x} ", .{block});
         }
     }
     try writer.writeByte('\n');
     try writer.writeByte('\n');
 
-    if (stream_dir.getMsfStreamAt(self.gpa, 1)) |pdb_stream| {
-        defer pdb_stream.deinit(self.gpa);
+    if (stream_dir.streamAtAlloc(self.gpa, 1, .{
+        .data = self.data,
+        .block_size = super_block.BlockSize,
+    })) |pdb_stream| {
+        defer self.gpa.free(pdb_stream);
+
+        var stream = std.io.fixedBufferStream(pdb_stream);
+        var creader = std.io.countingReader(stream.reader());
+        const reader = creader.reader();
 
         try writer.writeAll("PDB Info Stream #1\n");
         // PDBStream is at index #1
-        var pos: usize = 0;
-        const header = try pdb_stream.read(pdb.PdbStreamHeader, pos);
-        pos += @sizeOf(pdb.PdbStreamHeader);
+        const header = try reader.readStruct(pdb.PdbStreamHeader);
 
         inline for (@typeInfo(pdb.PdbStreamHeader).Struct.fields) |field| {
             try writer.print("  {s: <16} ", .{field.name});
@@ -159,22 +163,19 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
             try writer.writeByte('\n');
         }
 
-        const strtab_len = try pdb_stream.read(u32, pos);
-        pos += @sizeOf(u32);
-
-        const strtab = try pdb_stream.bytesAlloc(self.gpa, pos, strtab_len);
+        const strtab_len = try reader.readIntLittle(u32);
+        const strtab = try self.gpa.alloc(u8, strtab_len);
         defer self.gpa.free(strtab);
-        pos += strtab_len;
+        _ = try reader.readAll(strtab);
         log.warn("{s}", .{std.fmt.fmtSliceEscapeLower(strtab)});
 
-        var named_stream_map = try HashTable(u32).readFromMsfStream(pdb_stream, self.gpa, pos);
+        var named_stream_map = try HashTable(u32).read(self.gpa, reader);
         defer named_stream_map.deinit();
-        pos += named_stream_map.serializedSize();
 
-        const features_raw = try pdb_stream.bytesAlloc(self.gpa, pos, pdb_stream.size - pos);
-        defer self.gpa.free(features_raw);
-        const num_features = @divExact(features_raw.len, @sizeOf(pdb.PdbFeatureCode));
-        const features = @ptrCast([*]align(1) const pdb.PdbFeatureCode, features_raw.ptr)[0..num_features];
+        const num_features = @divExact(pdb_stream.len - creader.bytes_read, @sizeOf(pdb.PdbFeatureCode));
+        const features = try self.gpa.alloc(pdb.PdbFeatureCode, num_features);
+        defer self.gpa.free(features);
+        _ = try reader.readAll(@ptrCast([*]u8, features.ptr)[0 .. num_features * @sizeOf(pdb.PdbFeatureCode)]);
 
         for (features) |feature| {
             log.warn("feature = {}", .{feature});
@@ -208,34 +209,38 @@ fn getMsfFreeBlockMapIterator(self: *const PdbDump) FreeBlockMapIterator {
     return .{ .self = self };
 }
 
+const Ctx = struct {
+    data: []align(1) const u8,
+    block_size: u32,
+};
+
 const StreamDirectory = struct {
-    sizes: []const u8,
     stream: MsfStream,
 
     const invalid_stream: u32 = @bitCast(u32, @as(i32, -1));
 
     fn deinit(dir: StreamDirectory, gpa: Allocator) void {
-        gpa.free(dir.sizes);
+        gpa.free(dir.stream);
     }
 
-    fn getNumStreams(dir: StreamDirectory) usize {
-        return @divExact(dir.sizes.len, @sizeOf(u32));
+    fn getNumStreams(dir: StreamDirectory) u32 {
+        return @ptrCast(*align(1) const u32, dir.stream.ptr).*;
     }
 
     fn getStreamSizes(dir: StreamDirectory) []align(1) const u32 {
         const num_streams = dir.getNumStreams();
-        return @ptrCast([*]align(1) const u32, dir.sizes.ptr)[0..num_streams];
+        return @ptrCast([*]align(1) const u32, dir.stream.ptr + @sizeOf(u32))[0..num_streams];
     }
 
-    fn getMsfStreamAt(dir: StreamDirectory, gpa: Allocator, index: usize) !MsfStream {
+    fn getStreamBlocks(dir: StreamDirectory, index: usize, ctx: Ctx) ?[]align(1) const u32 {
         const num_streams = dir.getNumStreams();
-        if (index >= num_streams) return error.EndOfStream;
+        if (index >= num_streams) return null;
 
-        const block_size = dir.stream.ctx.getMsfSuperBlock().BlockSize;
         const stream_sizes = dir.getStreamSizes();
-        var stream_size = stream_sizes[index];
-        if (stream_size == invalid_stream) stream_size = 0;
-        const num_blocks = ceil(u32, stream_size, block_size);
+        const stream_size = stream_sizes[index];
+        if (stream_size == invalid_stream or stream_size == 0) return &[0]u32{};
+
+        const num_blocks = ceil(u32, stream_size, ctx.block_size);
 
         const total_prev_num_blocks = blk: {
             var sum: u32 = 0;
@@ -243,15 +248,25 @@ const StreamDirectory = struct {
             while (i < index) : (i += 1) {
                 var prev_size = stream_sizes[i];
                 if (prev_size == invalid_stream) prev_size = 0;
-                sum += ceil(u32, prev_size, block_size);
+                sum += ceil(u32, prev_size, ctx.block_size);
             }
             break :blk sum;
         };
 
         const pos = @sizeOf(u32) * (stream_sizes.len + 1 + total_prev_num_blocks);
-        const buffer = try dir.stream.bytesAlloc(gpa, pos, num_blocks * @sizeOf(u32));
+        return @ptrCast([*]align(1) const u32, dir.stream.ptr + pos)[0..num_blocks];
+    }
 
-        return MsfStream{ .ctx = dir.stream.ctx, .buffer = buffer, .size = stream_size };
+    fn streamAtAlloc(dir: StreamDirectory, gpa: Allocator, index: usize, ctx: Ctx) !MsfStream {
+        const blocks = dir.getStreamBlocks(index, ctx) orelse return error.EndOfStream;
+        const size = dir.getStreamSizes()[index];
+
+        const buffer = try gpa.alloc(u8, size);
+        errdefer gpa.free(buffer);
+
+        stitchBlocks(blocks, buffer, ctx);
+
+        return buffer;
     }
 };
 
@@ -262,71 +277,38 @@ inline fn ceil(comptime T: type, num: T, div: T) T {
 fn getStreamDirectory(self: *const PdbDump) !StreamDirectory {
     const super_block = self.getMsfSuperBlock();
     const pos = super_block.BlockMapAddr * super_block.BlockSize;
-    const stream = MsfStream{
-        .ctx = self,
-        .buffer = self.data[pos..][0..super_block.NumDirectoryBytes],
-        .size = super_block.NumDirectoryBytes,
-    };
-    const num_streams = try stream.read(u32, 0);
-    const sizes = try stream.bytesAlloc(self.gpa, @sizeOf(u32), num_streams * @sizeOf(u32));
+    const num = ceil(u32, super_block.NumDirectoryBytes, super_block.BlockSize);
+    const blocks = @ptrCast([*]align(1) const u32, self.data.ptr + pos)[0..num];
 
-    return StreamDirectory{ .sizes = sizes, .stream = stream };
+    const buffer = try self.gpa.alloc(u8, super_block.NumDirectoryBytes);
+    errdefer self.gpa.free(buffer);
+
+    stitchBlocks(blocks, buffer, .{
+        .data = self.data,
+        .block_size = super_block.BlockSize,
+    });
+
+    return StreamDirectory{ .stream = buffer };
 }
 
-pub const MsfStream = struct {
-    ctx: *const PdbDump,
-    buffer: []const u8,
-    size: usize,
+pub const MsfStream = []const u8;
 
-    pub fn deinit(stream: MsfStream, gpa: Allocator) void {
-        gpa.free(stream.buffer);
+fn stitchBlocks(blocks: []align(1) const u32, buffer: []u8, ctx: Ctx) void {
+    // Stitch together blocks belonging to the MsfStream.
+    var out = buffer;
+    var block_index: usize = 0;
+    var init_pos = blocks[block_index] * ctx.block_size;
+    const init_len = @min(buffer.len, ctx.block_size);
+    mem.copy(u8, out, ctx.data[init_pos..][0..init_len]);
+    out = out[init_len..];
+
+    var leftover = buffer.len - init_len;
+    while (leftover > 0) {
+        block_index += 1;
+        const next_pos = blocks[block_index] * ctx.block_size;
+        const copy_len = @min(leftover, ctx.block_size);
+        mem.copy(u8, out, ctx.data[next_pos..][0..copy_len]);
+        out = out[copy_len..];
+        leftover -= copy_len;
     }
-
-    fn blocks(stream: MsfStream) []align(1) const u32 {
-        const num = @divExact(stream.buffer.len, @sizeOf(u32));
-        return @ptrCast([*]align(1) const u32, stream.buffer.ptr)[0..num];
-    }
-
-    pub fn bytesAlloc(stream: MsfStream, gpa: Allocator, pos: usize, len: usize) ![]const u8 {
-        const buffer = try gpa.alloc(u8, len);
-        return stream.bytes(pos, buffer);
-    }
-
-    pub fn bytes(stream: MsfStream, pos: usize, buffer: []u8) ![]const u8 {
-        if (pos + buffer.len > stream.size) return error.EndOfStream;
-
-        const super_block = stream.ctx.getMsfSuperBlock();
-        const stream_blocks = stream.blocks();
-
-        // Hone in on the block(s) containing T and stitch together
-        // N subsequent blocks.
-        var out = buffer;
-        var index = @divTrunc(pos, super_block.BlockSize);
-        var init_pos = @rem(pos, super_block.BlockSize) + stream_blocks[index] * super_block.BlockSize;
-        const init_len = @min(buffer.len, super_block.BlockSize - @rem(pos, super_block.BlockSize));
-        mem.copy(u8, out, stream.ctx.data[init_pos..][0..init_len]);
-        out = out[init_len..];
-
-        var leftover = buffer.len - init_len;
-        while (leftover > 0) {
-            index += 1;
-            const next_pos = stream_blocks[index] * super_block.BlockSize;
-            const copy_len = @min(leftover, super_block.BlockSize);
-            mem.copy(u8, out, stream.ctx.data[next_pos..][0..copy_len]);
-            out = out[copy_len..];
-            leftover -= copy_len;
-        }
-
-        return buffer;
-    }
-
-    pub fn read(stream: MsfStream, comptime T: type, pos: usize) !T {
-        var buffer: [@sizeOf(T)]u8 = undefined;
-        const raw_bytes = try stream.bytes(pos, &buffer);
-        return switch (@typeInfo(T)) {
-            .Int => mem.readIntLittle(T, raw_bytes[0..@sizeOf(T)]),
-            .Struct => @ptrCast(*align(1) const T, raw_bytes).*,
-            else => @compileError("TODO unhandled"),
-        };
-    }
-};
+}
