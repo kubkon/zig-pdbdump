@@ -5,10 +5,10 @@ const fs = std.fs;
 const io = std.io;
 const log = std.log;
 const mem = std.mem;
+const pdb = @import("pdb.zig");
 
 const Allocator = mem.Allocator;
-
-const pdb = @import("pdb.zig");
+const BitSet = @import("BitSet.zig");
 
 gpa: Allocator,
 data: []const u8,
@@ -174,44 +174,25 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
         pos += @sizeOf(u32);
         log.warn("{x}", .{map_capacity});
 
-        const present_word_count = try pdb_stream.read(u32, pos);
-        pos += @sizeOf(u32);
-        log.warn("{x}", .{present_word_count});
+        var present_bit_set = try readBitSet(pdb_stream, self.gpa, pos);
+        defer present_bit_set.deinit(self.gpa);
+        pos += BitSet.numMasks(present_bit_set.bit_length) * @sizeOf(u32) + @sizeOf(u32);
 
-        const present_words_bytes = try pdb_stream.bytesAlloc(
-            self.gpa,
-            pos,
-            present_word_count * @sizeOf((u32)),
-        );
-        defer self.gpa.free(present_words_bytes);
-        pos += present_word_count * @sizeOf(u32);
-        const present_words = @ptrCast(
-            [*]align(1) const u32,
-            present_words_bytes.ptr,
-        )[0..present_word_count];
+        var deleted_bit_set = try readBitSet(pdb_stream, self.gpa, pos);
+        defer deleted_bit_set.deinit(self.gpa);
+        pos += BitSet.numMasks(deleted_bit_set.bit_length) * @sizeOf(u32) + @sizeOf(u32);
 
-        for (present_words) |present, present_i| {
-            log.warn("  word {x}: 0b{b}", .{ present_i, present });
-        }
-
-        const deleted_word_count = try pdb_stream.read(u32, pos);
-        pos += @sizeOf(u32);
-        log.warn("{x}", .{deleted_word_count});
-
-        const deleted_words_bytes = try pdb_stream.bytesAlloc(
-            self.gpa,
-            pos,
-            deleted_word_count * @sizeOf((u32)),
-        );
-        defer self.gpa.free(deleted_words_bytes);
-        pos += deleted_word_count * @sizeOf(u32);
-        const deleted_words = @ptrCast(
-            [*]align(1) const u32,
-            deleted_words_bytes.ptr,
-        )[0..deleted_word_count];
-
-        for (deleted_words) |deleted, deleted_i| {
-            log.warn("  word {x}: 0b{b}", .{ deleted_i, deleted });
+        {
+            var bucket_i: usize = 0;
+            while (bucket_i < map_capacity) : (bucket_i += 1) {
+                if (present_bit_set.isSet(bucket_i)) {
+                    log.warn("  slot {x} used", .{bucket_i});
+                } else if (deleted_bit_set.capacity() > 0 and deleted_bit_set.isSet(bucket_i)) {
+                    log.warn("  slot {x} tombstone", .{bucket_i});
+                } else {
+                    log.warn("  slot {x} empty", .{bucket_i});
+                }
+            }
         }
 
         var bucket_count: usize = 0;
@@ -373,3 +354,20 @@ const MsfStream = struct {
         };
     }
 };
+
+fn readBitSet(stream: MsfStream, gpa: Allocator, pos: usize) !BitSet {
+    const num_masks = try stream.read(u32, pos);
+    const raw_bytes = try stream.bytesAlloc(gpa, pos + @sizeOf(u32), num_masks * @sizeOf((u32)));
+    defer gpa.free(raw_bytes);
+
+    const bit_length = num_masks * @bitSizeOf(u32);
+    var bit_set = try BitSet.initEmpty(gpa, bit_length);
+
+    const masks = @ptrCast([*]align(1) const u32, raw_bytes.ptr)[0..num_masks];
+    for (masks) |mask, i| {
+        log.warn("mask {x}", .{mask});
+        bit_set.masks[num_masks - i - 1] = mask;
+    }
+
+    return bit_set;
+}
