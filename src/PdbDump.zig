@@ -139,8 +139,12 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
         try writer.writeAll("PDB Info Stream #1\n");
         // PDBStream is at index #1
         var pos: usize = 0;
+        const all_bytes = try pdb_stream.bytesAlloc(self.gpa, 0, pdb_stream.size);
+        log.warn("{x}", .{std.fmt.fmtSliceHexLower(all_bytes)});
+
         const header = try pdb_stream.read(pdb.PdbStreamHeader, pos);
         pos += @sizeOf(pdb.PdbStreamHeader);
+        log.warn("pos = {x}", .{pos});
 
         inline for (@typeInfo(pdb.PdbStreamHeader).Struct.fields) |field| {
             try writer.print("  {s: <16} ", .{field.name});
@@ -152,7 +156,7 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
             } else if (comptime mem.eql(u8, field.name, "Guid")) {
                 try writer.print("{x}", .{std.fmt.fmtSliceHexLower(&value)});
             } else {
-                try writer.print("{x}", .{value});
+                try writer.print("{d}", .{value});
             }
 
             try writer.writeByte('\n');
@@ -168,19 +172,22 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
 
         const map_len = try pdb_stream.read(u32, pos);
         pos += @sizeOf(u32);
-        log.warn("{x}", .{map_len});
+        log.warn("size = {x}", .{map_len});
 
         const map_capacity = try pdb_stream.read(u32, pos);
         pos += @sizeOf(u32);
-        log.warn("{x}", .{map_capacity});
+        log.warn("capacity = {x}", .{map_capacity});
 
-        var present_bit_set = try readBitSet(pdb_stream, self.gpa, pos);
+        const num_masks = try pdb_stream.read(u32, pos);
+        pos += @sizeOf(u32);
+
+        var present_bit_set = try readBitSet(pdb_stream, self.gpa, pos, num_masks);
         defer present_bit_set.deinit(self.gpa);
-        pos += BitSet.numMasks(present_bit_set.bit_length) * @sizeOf(u32) + @sizeOf(u32);
+        pos += BitSet.numMasks(present_bit_set.bit_length) * @sizeOf(u32);
 
-        var deleted_bit_set = try readBitSet(pdb_stream, self.gpa, pos);
+        var deleted_bit_set = try readBitSet(pdb_stream, self.gpa, pos, num_masks);
         defer deleted_bit_set.deinit(self.gpa);
-        pos += BitSet.numMasks(deleted_bit_set.bit_length) * @sizeOf(u32) + @sizeOf(u32);
+        pos += BitSet.numMasks(deleted_bit_set.bit_length) * @sizeOf(u32);
 
         {
             var bucket_i: usize = 0;
@@ -195,6 +202,7 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
             }
         }
 
+        log.warn("pos = {x}, size = {x}", .{ pos, pdb_stream.size });
         var bucket_count: usize = 0;
         while (bucket_count < map_capacity) : (bucket_count += 1) {
             const key = try pdb_stream.read(u32, pos);
@@ -202,6 +210,16 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
             pos += 2 * @sizeOf(u32);
 
             log.warn("  key = {x}, value = {x}", .{ key, value });
+        }
+
+        log.warn("pos = {x}, size = {x}", .{ pos, pdb_stream.size });
+        const features_raw = try pdb_stream.bytesAlloc(self.gpa, pos, pdb_stream.size - pos);
+        defer self.gpa.free(features_raw);
+        const num_features = @divExact(features_raw.len, @sizeOf(u32));
+        const features = @ptrCast([*]align(1) const u32, features_raw.ptr)[0..num_features];
+
+        for (features) |feature| {
+            log.warn("feature = {x}", .{feature});
         }
     } else |err| switch (err) {
         error.EndOfStream => try writer.writeAll("No PDB Info Stream found.\n"),
@@ -275,7 +293,7 @@ const StreamDirectory = struct {
         const pos = @sizeOf(u32) * (stream_sizes.len + 1 + total_prev_num_blocks);
         const buffer = try dir.stream.bytesAlloc(gpa, pos, num_blocks * @sizeOf(u32));
 
-        return MsfStream{ .ctx = dir.stream.ctx, .buffer = buffer };
+        return MsfStream{ .ctx = dir.stream.ctx, .buffer = buffer, .size = stream_size };
     }
 };
 
@@ -289,6 +307,7 @@ fn getStreamDirectory(self: *const PdbDump) !StreamDirectory {
     const stream = MsfStream{
         .ctx = self,
         .buffer = self.data[pos..][0..super_block.NumDirectoryBytes],
+        .size = super_block.NumDirectoryBytes,
     };
     const num_streams = try stream.read(u32, 0);
     const sizes = try stream.bytesAlloc(self.gpa, @sizeOf(u32), num_streams * @sizeOf(u32));
@@ -299,6 +318,7 @@ fn getStreamDirectory(self: *const PdbDump) !StreamDirectory {
 const MsfStream = struct {
     ctx: *const PdbDump,
     buffer: []const u8,
+    size: usize,
 
     fn deinit(stream: MsfStream, gpa: Allocator) void {
         gpa.free(stream.buffer);
@@ -315,12 +335,10 @@ const MsfStream = struct {
     }
 
     fn bytes(stream: MsfStream, pos: usize, buffer: []u8) ![]const u8 {
+        if (pos + buffer.len > stream.size) return error.EndOfStream;
+
         const super_block = stream.ctx.getMsfSuperBlock();
         const stream_blocks = stream.blocks();
-
-        if (pos + buffer.len >= stream_blocks.len * super_block.BlockSize) {
-            return error.EndOfStream;
-        }
 
         // Hone in on the block(s) containing T and stitch together
         // N subsequent blocks.
@@ -355,9 +373,8 @@ const MsfStream = struct {
     }
 };
 
-fn readBitSet(stream: MsfStream, gpa: Allocator, pos: usize) !BitSet {
-    const num_masks = try stream.read(u32, pos);
-    const raw_bytes = try stream.bytesAlloc(gpa, pos + @sizeOf(u32), num_masks * @sizeOf((u32)));
+fn readBitSet(stream: MsfStream, gpa: Allocator, pos: usize, num_masks: u32) !BitSet {
+    const raw_bytes = try stream.bytesAlloc(gpa, pos, num_masks * @sizeOf((u32)));
     defer gpa.free(raw_bytes);
 
     const bit_length = num_masks * @bitSizeOf(u32);
@@ -366,7 +383,7 @@ fn readBitSet(stream: MsfStream, gpa: Allocator, pos: usize) !BitSet {
     const masks = @ptrCast([*]align(1) const u32, raw_bytes.ptr)[0..num_masks];
     for (masks) |mask, i| {
         log.warn("mask {x}", .{mask});
-        bit_set.masks[num_masks - i - 1] = mask;
+        bit_set.masks[i] = mask;
     }
 
     return bit_set;
