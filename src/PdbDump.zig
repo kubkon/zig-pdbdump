@@ -133,7 +133,7 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
     try writer.writeByte('\n');
     try writer.writeByte('\n');
 
-    if (stream_dir.streamAtAlloc(self.gpa, 1, .{
+    if (try stream_dir.streamAtAlloc(self.gpa, 1, .{
         .data = self.data,
         .block_size = super_block.BlockSize,
     })) |pdb_stream| {
@@ -180,9 +180,8 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
         for (features) |feature| {
             log.warn("feature = {}", .{feature});
         }
-    } else |err| switch (err) {
-        error.EndOfStream => try writer.writeAll("No PDB Info Stream found.\n"),
-        else => |e| return e,
+    } else {
+        try writer.writeAll("No PDB Info Stream found.\n");
     }
 }
 
@@ -257,8 +256,8 @@ const StreamDirectory = struct {
         return @ptrCast([*]align(1) const u32, dir.stream.ptr + pos)[0..num_blocks];
     }
 
-    fn streamAtAlloc(dir: StreamDirectory, gpa: Allocator, index: usize, ctx: Ctx) !MsfStream {
-        const blocks = dir.getStreamBlocks(index, ctx) orelse return error.EndOfStream;
+    fn streamAtAlloc(dir: StreamDirectory, gpa: Allocator, index: usize, ctx: Ctx) error{OutOfMemory}!?MsfStream {
+        const blocks = dir.getStreamBlocks(index, ctx) orelse return null;
         const size = dir.getStreamSizes()[index];
 
         const buffer = try gpa.alloc(u8, size);
@@ -274,7 +273,7 @@ inline fn ceil(comptime T: type, num: T, div: T) T {
     return @divTrunc(num, div) + @boolToInt(@rem(num, div) > 0);
 }
 
-fn getStreamDirectory(self: *const PdbDump) !StreamDirectory {
+fn getStreamDirectory(self: *const PdbDump) error{OutOfMemory}!StreamDirectory {
     const super_block = self.getMsfSuperBlock();
     const pos = super_block.BlockMapAddr * super_block.BlockSize;
     const num = ceil(u32, super_block.NumDirectoryBytes, super_block.BlockSize);
