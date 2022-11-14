@@ -42,3 +42,13 @@ pub const PdbStreamVersion = enum(u32) {
     _,
     // zig fmt: on
 };
+
+pub const PdbFeatureCode = enum(u32) {
+    // zig fmt: off
+    VC110            = 20091201,
+    VC140            = 20140508,
+    NoTypeMerge      = 0x4D544F4E,
+    MinimalDebugInfo = 0x494E494D,
+    _,
+    // zig fmt: on
+};
