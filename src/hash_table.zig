@@ -147,15 +147,12 @@ pub fn HashTable(comptime Value: type) type {
         pub fn serializedSize(self: Self) usize {
             var size: usize = @sizeOf(Header);
 
-            if (findLastSet(self.present)) |index| {
-                size += numMasks(u32, index + 1) * @sizeOf(u32);
+            for (&[_]DynamicBitSetUnmanaged{ self.present, self.deleted }) |vec| {
+                if (findLastSet(vec)) |index| {
+                    size += numMasks(u32, index + 1) * @sizeOf(u32);
+                }
+                size += @sizeOf(u32);
             }
-            size += @sizeOf(u32);
-
-            if (findLastSet(self.deleted)) |index| {
-                size += numMasks(u32, index + 1) * @sizeOf(u32);
-            }
-            size += @sizeOf(u32);
 
             size += self.count() * @sizeOf(Entry);
 
@@ -210,6 +207,35 @@ pub fn HashTable(comptime Value: type) type {
 
             return self;
         }
+
+        pub fn write(self: Self, writer: anytype) !void {
+            try writer.writeAll(@ptrCast([*]const u8, &self.header)[0..@sizeOf(Header)]);
+
+            for (&[_]DynamicBitSetUnmanaged{ self.present, self.deleted }) |vec| {
+                // Calculate number of words for the bit vector
+                const present_num_words: u32 = if (findLastSet(vec)) |index|
+                    @intCast(u32, numMasks(u32, index + 1))
+                else
+                    0;
+                try writer.writeIntLittle(u32, present_num_words);
+
+                // Serialize the sequence of bitvector's masks
+                if (present_num_words > 0) {
+                    const present_words = @ptrCast([*]const u32, vec.masks)[0..present_num_words];
+                    for (present_words) |word| {
+                        try writer.writeIntLittle(u32, word);
+                    }
+                }
+            }
+
+            // Finally, serialize valid (present) buckets in the bucket list
+            var it = self.present.iterator(.{});
+            while (it.next()) |index| {
+                const entry = self.buckets.items[index];
+                try writer.writeIntLittle(u32, entry.key);
+                try writer.writeAll(@ptrCast([*]const u8, &entry.value)[0..@sizeOf(Value)]);
+            }
+        }
     };
 }
 
@@ -251,11 +277,15 @@ fn findLastSet(bitset: DynamicBitSetUnmanaged) ?usize {
     return it.next();
 }
 
-test "roundtrip test - panic.pdb" {
+test "roundtrip test - compatibility with LLVM" {
+    // Since our HashTable implementation is based on that of LLVM's,
+    // input `buffer` is also the expected output buffer.
     const buffer: []const u8 =
-        "\x02\x00\x00\x00\x04\x00\x00\x00\x01\x00\x00\x00" ++
-        "\x06\x00\x00\x00\x00\x00\x00\x00\n\x00\x00\x00" ++
-        "\x0f\x00\x00\x00\x00\x00\x00\x00\x05\x00\x00\x00";
+        "\x02\x00\x00\x00\x04\x00\x00\x00" ++
+        "\x01\x00\x00\x00\x06\x00\x00\x00" ++
+        "\x00\x00\x00\x00\x0a\x00\x00\x00" ++
+        "\x0f\x00\x00\x00\x00\x00\x00\x00" ++
+        "\x05\x00\x00\x00";
 
     var stream = std.io.fixedBufferStream(buffer);
     const reader = stream.reader();
@@ -264,10 +294,28 @@ test "roundtrip test - panic.pdb" {
     defer table.deinit(testing.allocator);
 
     try testing.expectEqual(buffer.len, table.serializedSize());
+
+    var output = std.ArrayList(u8).init(testing.allocator);
+    defer output.deinit();
+    try output.ensureTotalCapacityPrecise(table.serializedSize());
+    try table.write(output.writer());
+
+    try testing.expectEqualStrings(buffer, output.items);
 }
 
-test "roundtrip test - simple.pdb" {
-    const buffer: []const u8 = "\x06\x00\x00\x00\n\x00\x00\x00\x01\x00\x00\x00o\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00+\x00\x00\x00\x89\x01\x00\x00\x1a\x00\x00\x00\x87\x01\x00\x00\x00\x00\x00\x00\x05\x00\x00\x00\n\x00\x00\x00\x06\x00\x00\x00\x13\x00\x00\x00\x07\x00\x00\x00J\x00\x00\x00\x8c\x01\x00\x00";
+test "roundtrip test - compatibility with MSVC" {
+    // Since our HashTable implementation is based on that of LLVM's,
+    // we differ slightly in how we lower the bitvectors compared to MSVC.
+    const buffer: []const u8 =
+        "\x06\x00\x00\x00\x0a\x00\x00\x00" ++
+        "\x01\x00\x00\x00\x6f\x00\x00\x00" ++
+        "\x01\x00\x00\x00\x00\x00\x00\x00" ++
+        "\x2b\x00\x00\x00\x89\x01\x00\x00" ++
+        "\x1a\x00\x00\x00\x87\x01\x00\x00" ++
+        "\x00\x00\x00\x00\x05\x00\x00\x00" ++
+        "\x0a\x00\x00\x00\x06\x00\x00\x00" ++
+        "\x13\x00\x00\x00\x07\x00\x00\x00" ++
+        "\x4a\x00\x00\x00\x8c\x01\x00\x00";
 
     var stream = std.io.fixedBufferStream(buffer);
     const reader = stream.reader();
@@ -275,5 +323,21 @@ test "roundtrip test - simple.pdb" {
     var table = try HashTable(u32).read(testing.allocator, reader);
     defer table.deinit(testing.allocator);
 
-    try testing.expectEqual(buffer.len - 4, table.serializedSize());
+    var output = std.ArrayList(u8).init(testing.allocator);
+    defer output.deinit();
+    try output.ensureTotalCapacityPrecise(table.serializedSize());
+    try table.write(output.writer());
+
+    const expected: []const u8 =
+        "\x06\x00\x00\x00\x0a\x00\x00\x00" ++
+        "\x01\x00\x00\x00\x6f\x00\x00\x00" ++
+        "\x00\x00\x00\x00\x2b\x00\x00\x00" ++
+        "\x89\x01\x00\x00\x1a\x00\x00\x00" ++
+        "\x87\x01\x00\x00\x00\x00\x00\x00" ++
+        "\x05\x00\x00\x00\x0a\x00\x00\x00" ++
+        "\x06\x00\x00\x00\x13\x00\x00\x00" ++
+        "\x07\x00\x00\x00\x4a\x00\x00\x00" ++
+        "\x8c\x01\x00\x00";
+
+    try testing.expectEqualStrings(expected, output.items);
 }
