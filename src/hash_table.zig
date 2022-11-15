@@ -8,6 +8,8 @@ const Allocator = mem.Allocator;
 const DynamicBitSetUnmanaged = std.bit_set.DynamicBitSetUnmanaged;
 const MsfStream = @import("PdbDump.zig").MsfStream;
 
+/// Corresponds to LLVM's `hashStringV1` and Microsoft's `Hasher::lhashPbCb`.
+/// This hash is used for name hash table (such as NamedStreamMap) and TPI/IPI hashes.
 pub fn hashStringV1(str: []const u8) u32 {
     var result: u32 = 0;
 
@@ -38,6 +40,8 @@ pub fn hashStringV1(str: []const u8) u32 {
     return result;
 }
 
+/// Corresponds to LLVM's `hashStringV2` and Microsoft's `HasherV2::HashULONG`.
+/// This hash is used for name hash table.
 pub fn hashStringV2(str: []const u8) u32 {
     var result: u32 = 0xb170a1bf;
 
@@ -58,6 +62,25 @@ pub fn hashStringV2(str: []const u8) u32 {
     return result *% 1664525 +% 1013904223;
 }
 
+/// Represents the PDB serializable hash table.
+/// This container is used internally in the PDB file format.
+/// The value type is generic, while the key type is fixed and equal to `u32`.
+///
+/// Insertion/lookup in presence of hash collisions:
+/// (based on LLVM's official implementation)
+///
+///     Insertion is done via the so-called linear probing, that is,
+///     for any given hash value of the key, we get the start index into
+///     the bucket in the hash table. If the bucket at that index is already
+///     occupied, we iterate the subsequent buckets until we hit an empty/deleted one.
+///
+/// Load factor:
+///
+///     According to Microsoft's official requirements, the load factor should never
+///     exceed `capacity * 2 / 3 + 1`.
+///
+/// For more info, see:
+/// https://llvm.org/docs/PDB/HashTable.html
 pub fn HashTable(comptime Value: type) type {
     return struct {
         header: Header = .{ .size = 0, .capacity = 0 },
@@ -83,6 +106,7 @@ pub fn HashTable(comptime Value: type) type {
             self.deleted.deinit(gpa);
         }
 
+        /// Returns the number of values present in the HashTable.
         pub fn count(self: Self) usize {
             return self.present.count();
         }
@@ -92,6 +116,10 @@ pub fn HashTable(comptime Value: type) type {
             index: u32,
         };
 
+        /// If the `key` exists in the HashTable, returns `index` to the bucket holding the `value`.
+        /// In this case, `existing` is set to `true`.
+        /// If the `key` doesn't exist, returns `index` to the first available bucket.
+        /// In this case, `existing` is set to `false`.
         pub fn getIndexOrFirstUnused(
             self: Self,
             comptime Key: type,
@@ -134,6 +162,10 @@ pub fn HashTable(comptime Value: type) type {
             };
         }
 
+        /// Returns the corresponding for `key`.
+        /// Asserts `key` exists in the HashTable.
+        /// If there exists possibility of the `key` not existing in the HashTable, use `getIndexOrFindFirst` instead.
+        /// This maches the implementation of the HashTable found in LLVM's sources.
         pub fn get(self: Self, comptime Key: type, comptime Context: type, key: Key, ctx: Context) Value {
             const res = self.getIndexOrFirstUnused(Key, Context, key, ctx);
             assert(res.existing);
@@ -144,6 +176,9 @@ pub fn HashTable(comptime Value: type) type {
             return (bit_length + (@bitSizeOf(Word) - 1)) / @bitSizeOf(Word);
         }
 
+        /// Calculates required number of bytes to serialize the HashTable
+        /// to a byte stream.
+        /// Use it to preallocate the output buffer.
         pub fn serializedSize(self: Self) usize {
             var size: usize = @sizeOf(Header);
 
@@ -159,6 +194,9 @@ pub fn HashTable(comptime Value: type) type {
             return size;
         }
 
+        /// Reads the HashTable from an input stream.
+        /// HashTable is serialized according to the PDB spec found at:
+        /// https://llvm.org/docs/PDB/HashTable.html
         pub fn read(gpa: Allocator, reader: anytype) !Self {
             const header = try reader.readStruct(Header);
 
@@ -208,6 +246,9 @@ pub fn HashTable(comptime Value: type) type {
             return self;
         }
 
+        /// Writes the HashTable to an output stream.
+        /// HashTable is serialized according to the PDB spec found at:
+        /// https://llvm.org/docs/PDB/HashTable.html
         pub fn write(self: Self, writer: anytype) !void {
             try writer.writeAll(@ptrCast([*]const u8, &self.header)[0..@sizeOf(Header)]);
 
