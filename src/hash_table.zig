@@ -133,7 +133,7 @@ pub fn HashTable(comptime Value: type) type {
 
             while (true) {
                 if (self.present.isSet(index)) {
-                    if (ctx.invHash(self.buckets.items[index].key)) |okey| {
+                    if (ctx.getKeyAdapted(self.buckets.items[index].key)) |okey| {
                         if (mem.eql(u8, okey, key)) {
                             return .{
                                 .existing = true,
@@ -170,6 +170,10 @@ pub fn HashTable(comptime Value: type) type {
             const res = self.getIndexOrFirstUnused(Key, Context, key, ctx);
             assert(res.existing);
             return self.buckets.items[res.index].value;
+        }
+
+        fn maxLoad(capacity: u32) u32 {
+            return capacity * 2 / 3 + 1;
         }
 
         inline fn numMasks(comptime Word: type, bit_length: usize) usize {
@@ -381,4 +385,70 @@ test "roundtrip test - compatibility with MSVC" {
         "\x8c\x01\x00\x00";
 
     try testing.expectEqualStrings(expected, output.items);
+}
+
+const StringContext = struct {
+    strtab: *std.ArrayList(u8),
+
+    pub fn hash(ctx: @This(), key: []const u8) u32 {
+        _ = ctx;
+        return @truncate(u16, hashStringV1(key));
+    }
+
+    pub fn getKeyAdapted(ctx: @This(), adapted: u32) ?[]const u8 {
+        if (adapted > ctx.strtab.items.len) return null;
+        return mem.sliceTo(@ptrCast([*:0]u8, ctx.strtab.items.ptr + adapted), 0);
+    }
+
+    pub fn putKeyAdapted(ctx: @This(), key: []const u8) error{OutOfMemory}!u32 {
+        const adapted = @intCast(u32, ctx.strtab.items.len);
+        try ctx.strtab.ensureUnusedCapacity(key.len + 1);
+        ctx.strtab.appendSliceAssumeCapacity(key);
+        ctx.strtab.appendAssumeCapacity(0);
+        return adapted;
+    }
+};
+
+test "get by key" {
+    const buffer: []const u8 =
+        "\x02\x00\x00\x00\x04\x00\x00\x00" ++
+        "\x01\x00\x00\x00\x06\x00\x00\x00" ++
+        "\x00\x00\x00\x00\x0a\x00\x00\x00" ++
+        "\x0f\x00\x00\x00\x00\x00\x00\x00" ++
+        "\x05\x00\x00\x00";
+
+    var stream = std.io.fixedBufferStream(buffer);
+    const reader = stream.reader();
+
+    var table = try HashTable(u32).read(testing.allocator, reader);
+    defer table.deinit(testing.allocator);
+
+    var strtab = std.ArrayList(u8).init(testing.allocator);
+    defer strtab.deinit();
+
+    const ctx = StringContext{ .strtab = &strtab };
+
+    {
+        const off = try ctx.putKeyAdapted("/LinkInfo");
+        try testing.expectEqual(@as(u32, 0), off);
+    }
+    {
+        const off = try ctx.putKeyAdapted("/names");
+        try testing.expectEqual(@as(u32, 0xa), off);
+    }
+
+    var res = table.getIndexOrFirstUnused([]const u8, StringContext, "/names", ctx);
+    try testing.expect(res.existing);
+    try testing.expect(ctx.getKeyAdapted(table.buckets.items[res.index].key) != null);
+    try testing.expectEqualStrings(ctx.getKeyAdapted(table.buckets.items[res.index].key).?, "/names");
+    try testing.expectEqual(table.buckets.items[res.index].value, 0xf);
+
+    res = table.getIndexOrFirstUnused([]const u8, StringContext, "/LinkInfo", ctx);
+    try testing.expect(res.existing);
+    try testing.expect(ctx.getKeyAdapted(table.buckets.items[res.index].key) != null);
+    try testing.expectEqualStrings(ctx.getKeyAdapted(table.buckets.items[res.index].key).?, "/LinkInfo");
+    try testing.expectEqual(table.buckets.items[res.index].value, 0x5);
+
+    res = table.getIndexOrFirstUnused([]const u8, StringContext, "/TMCache", ctx);
+    try testing.expect(!res.existing);
 }

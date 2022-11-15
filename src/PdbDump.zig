@@ -335,7 +335,7 @@ const NamedStreamMap = struct {
             return @truncate(u16, hash_table.hashStringV1(key));
         }
 
-        pub fn invHash(ctx: @This(), offset: u32) ?[]const u8 {
+        pub fn getKeyAdapted(ctx: @This(), offset: u32) ?[]const u8 {
             if (offset > ctx.map.strtab.items.len) return null;
             return mem.sliceTo(@ptrCast([*:0]u8, ctx.map.strtab.items.ptr + offset), 0);
         }
