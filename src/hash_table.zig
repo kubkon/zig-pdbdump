@@ -228,3 +228,15 @@ test "roundtrip test - panic.pdb" {
 
     try testing.expectEqual(table.serializedSize(), buffer.len);
 }
+
+test "roundtrip test - simple.pdb" {
+    const buffer: []const u8 = "\x06\x00\x00\x00\n\x00\x00\x00\x01\x00\x00\x00o\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00+\x00\x00\x00\x89\x01\x00\x00\x1a\x00\x00\x00\x87\x01\x00\x00\x00\x00\x00\x00\x05\x00\x00\x00\n\x00\x00\x00\x06\x00\x00\x00\x13\x00\x00\x00\x07\x00\x00\x00J\x00\x00\x00\x8c\x01\x00\x00";
+
+    var stream = std.io.fixedBufferStream(buffer);
+    const reader = stream.reader();
+
+    var table = try HashTable(u32).read(testing.allocator, reader);
+    defer table.deinit(testing.allocator);
+
+    try testing.expectEqual(table.serializedSize(), buffer.len);
+}
