@@ -169,8 +169,14 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
 
         var nsm_it = named_stream_map.iterator();
         while (nsm_it.next()) |name| {
-            const stream_index = named_stream_map.getStreamIndex(name);
+            const stream_index = named_stream_map.getStreamIndex(name).?;
             log.warn("stream '{s}' at index #{x}", .{ name, stream_index });
+        }
+
+        if (named_stream_map.getStreamIndex("/TMCache")) |stream_index| {
+            log.warn("stream '/TMCache' at index #{x}", .{stream_index});
+        } else {
+            log.warn("stream '/TMCache' not found", .{});
         }
 
         const num_features = @divExact(pdb_stream.len - creader.bytes_read, @sizeOf(pdb.PdbFeatureCode));
@@ -325,6 +331,7 @@ const NamedStreamMap = struct {
 
         pub fn hash(ctx: @This(), key: []const u8) u32 {
             _ = ctx;
+            // It is a bug not to truncate a valid u32 to u16.
             return @truncate(u16, hash_table.hashStringV1(key));
         }
 
@@ -334,8 +341,12 @@ const NamedStreamMap = struct {
         }
     };
 
-    fn getStreamIndex(self: NamedStreamMap, key: []const u8) u32 {
-        return self.hash_table.get([]const u8, HashContext, key, .{ .map = &self });
+    fn getStreamIndex(self: NamedStreamMap, key: []const u8) ?u32 {
+        const res = self.hash_table.getIndexOrFirstUnused([]const u8, HashContext, key, .{ .map = &self });
+        if (!res.existing) {
+            return null;
+        }
+        return self.hash_table.buckets.items[res.index].value;
     }
 
     fn read(gpa: Allocator, reader: anytype) !NamedStreamMap {

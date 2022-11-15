@@ -86,9 +86,19 @@ pub fn HashTable(comptime Value: type) type {
             return self.present.count();
         }
 
-        pub fn get(self: Self, comptime Key: type, comptime Context: type, key: Key, ctx: Context) Value {
-            const actual_hash = ctx.hash(key);
-            const hash_bucket = actual_hash % self.header.capacity;
+        const GetIndexOrFirstUnused = struct {
+            existing: bool,
+            index: u32,
+        };
+
+        pub fn getIndexOrFirstUnused(
+            self: Self,
+            comptime Key: type,
+            comptime Context: type,
+            key: Key,
+            ctx: Context,
+        ) GetIndexOrFirstUnused {
+            const hash_bucket = ctx.hash(key) % self.header.capacity;
             var index = hash_bucket;
             var first_unused: ?u32 = null;
 
@@ -96,7 +106,10 @@ pub fn HashTable(comptime Value: type) type {
                 if (self.present.capacity() > index and self.present.isSet(index)) {
                     if (ctx.invHash(self.buckets.items[index].key)) |okey| {
                         if (mem.eql(u8, okey, key)) {
-                            return self.buckets.items[index].value;
+                            return .{
+                                .existing = true,
+                                .index = index,
+                            };
                         }
                     }
                 } else {
@@ -114,7 +127,16 @@ pub fn HashTable(comptime Value: type) type {
             }
 
             assert(first_unused != null);
-            return self.buckets.items[first_unused.?].value;
+            return .{
+                .existing = false,
+                .index = first_unused.?,
+            };
+        }
+
+        pub fn get(self: Self, comptime Key: type, comptime Context: type, key: Key, ctx: Context) Value {
+            const res = self.getIndexOrFirstUnused(Key, Context, key, ctx);
+            assert(res.existing);
+            return self.buckets.items[res.index].value;
         }
 
         inline fn numMasks(bitset: DynamicBitSetUnmanaged) usize {
