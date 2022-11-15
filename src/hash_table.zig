@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const log = std.log;
 const mem = std.mem;
+const testing = std.testing;
 
 const Allocator = mem.Allocator;
 const DynamicBitSetUnmanaged = std.bit_set.DynamicBitSetUnmanaged;
@@ -211,4 +212,19 @@ fn readBitSet(comptime Word: type, gpa: Allocator, bitset: *DynamicBitSetUnmanag
             }
         }
     }
+}
+
+test "roundtrip test - panic.pdb" {
+    const buffer: []const u8 =
+        "\x02\x00\x00\x00\x04\x00\x00\x00\x01\x00\x00\x00" ++
+        "\x06\x00\x00\x00\x00\x00\x00\x00\n\x00\x00\x00" ++
+        "\x0f\x00\x00\x00\x00\x00\x00\x00\x05\x00\x00\x00";
+
+    var stream = std.io.fixedBufferStream(buffer);
+    const reader = stream.reader();
+
+    var table = try HashTable(u32).read(testing.allocator, reader);
+    defer table.deinit(testing.allocator);
+
+    try testing.expectEqual(table.serializedSize(), buffer.len);
 }

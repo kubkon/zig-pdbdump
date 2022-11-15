@@ -49,3 +49,7 @@ fn printUsageWithHelp(stream: anytype, comptime params: []const clap.Param(clap.
     try stream.print("\n", .{});
     try clap.help(stream, clap.Help, params, .{});
 }
+
+test {
+    _ = @import("hash_table.zig");
+}
