@@ -2,6 +2,7 @@ const PdbDump = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
+const hash_table = @import("hash_table.zig");
 const fs = std.fs;
 const io = std.io;
 const log = std.log;
@@ -9,7 +10,7 @@ const mem = std.mem;
 const pdb = @import("pdb.zig");
 
 const Allocator = mem.Allocator;
-const HashTable = @import("hash_table.zig").HashTable;
+const HashTable = hash_table.HashTable;
 
 gpa: Allocator,
 data: []const u8,
@@ -163,14 +164,14 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
             try writer.writeByte('\n');
         }
 
-        const strtab_len = try reader.readIntLittle(u32);
-        const strtab = try self.gpa.alloc(u8, strtab_len);
-        defer self.gpa.free(strtab);
-        _ = try reader.readAll(strtab);
-        log.warn("{s}", .{std.fmt.fmtSliceEscapeLower(strtab)});
+        var named_stream_map = try NamedStreamMap.read(self.gpa, reader);
+        defer named_stream_map.deinit(self.gpa);
 
-        var named_stream_map = try HashTable(u32).read(self.gpa, reader);
-        defer named_stream_map.deinit();
+        var nsm_it = named_stream_map.iterator();
+        while (nsm_it.next()) |name| {
+            const stream_index = named_stream_map.getStreamIndex(name);
+            log.warn("stream '{s}' at index #{x}", .{ name, stream_index });
+        }
 
         const num_features = @divExact(pdb_stream.len - creader.bytes_read, @sizeOf(pdb.PdbFeatureCode));
         const features = try self.gpa.alloc(pdb.PdbFeatureCode, num_features);
@@ -309,3 +310,60 @@ fn stitchBlocks(blocks: []align(1) const u32, buffer: []u8, ctx: Ctx) void {
         leftover -= copy_len;
     }
 }
+
+const NamedStreamMap = struct {
+    strtab: std.ArrayListUnmanaged(u8) = .{},
+    hash_table: HashTable(u32) = .{},
+
+    fn deinit(self: *NamedStreamMap, gpa: Allocator) void {
+        self.strtab.deinit(gpa);
+        self.hash_table.deinit(gpa);
+    }
+
+    pub const HashContext = struct {
+        map: *const NamedStreamMap,
+
+        pub fn hash(ctx: @This(), key: []const u8) u32 {
+            _ = ctx;
+            return @truncate(u16, hash_table.hashStringV1(key));
+        }
+
+        pub fn invHash(ctx: @This(), offset: u32) ?[]const u8 {
+            if (offset > ctx.map.strtab.items.len) return null;
+            return mem.sliceTo(@ptrCast([*:0]u8, ctx.map.strtab.items.ptr + offset), 0);
+        }
+    };
+
+    fn getStreamIndex(self: NamedStreamMap, key: []const u8) u32 {
+        return self.hash_table.get([]const u8, HashContext, key, .{ .map = &self });
+    }
+
+    fn read(gpa: Allocator, reader: anytype) !NamedStreamMap {
+        var map = NamedStreamMap{};
+
+        const strtab_len = try reader.readIntLittle(u32);
+        try map.strtab.resize(gpa, strtab_len);
+        const amt = try reader.readAll(map.strtab.items);
+        if (amt != strtab_len) return error.InputOutput;
+
+        map.hash_table = try HashTable(u32).read(gpa, reader);
+
+        return map;
+    }
+
+    const Iterator = struct {
+        strtab: []const u8,
+        pos: usize = 0,
+
+        fn next(it: *Iterator) ?[]const u8 {
+            if (it.pos == it.strtab.len) return null;
+            const str = mem.sliceTo(@ptrCast([*:0]const u8, it.strtab.ptr + it.pos), 0);
+            it.pos += str.len + 1;
+            return str;
+        }
+    };
+
+    fn iterator(self: NamedStreamMap) Iterator {
+        return .{ .strtab = self.strtab.items };
+    }
+};
