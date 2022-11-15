@@ -104,7 +104,7 @@ pub fn HashTable(comptime Value: type) type {
             var first_unused: ?u32 = null;
 
             while (true) {
-                if (self.present.capacity() > index and self.present.isSet(index)) {
+                if (self.present.isSet(index)) {
                     if (ctx.invHash(self.buckets.items[index].key)) |okey| {
                         if (mem.eql(u8, okey, key)) {
                             return .{
@@ -118,7 +118,7 @@ pub fn HashTable(comptime Value: type) type {
                         first_unused = index;
                     }
 
-                    if (self.deleted.capacity() <= index or !self.deleted.isSet(index)) {
+                    if (!self.deleted.isSet(index)) {
                         break;
                     }
                 }
@@ -140,15 +140,25 @@ pub fn HashTable(comptime Value: type) type {
             return self.buckets.items[res.index].value;
         }
 
-        inline fn numMasks(bitset: DynamicBitSetUnmanaged) usize {
-            return (bitset.capacity() + (@bitSizeOf(u32) - 1)) / @bitSizeOf(u32);
+        inline fn numMasks(comptime Word: type, bit_length: usize) usize {
+            return (bit_length + (@bitSizeOf(Word) - 1)) / @bitSizeOf(Word);
         }
 
         pub fn serializedSize(self: Self) usize {
             var size: usize = @sizeOf(Header);
-            size += (numMasks(self.present) + 1) * @sizeOf(u32);
-            size += (numMasks(self.deleted) + 1) * @sizeOf(u32);
+
+            if (findLastSet(self.present)) |index| {
+                size += numMasks(u32, index + 1) * @sizeOf(u32);
+            }
+            size += @sizeOf(u32);
+
+            if (findLastSet(self.deleted)) |index| {
+                size += numMasks(u32, index + 1) * @sizeOf(u32);
+            }
+            size += @sizeOf(u32);
+
             size += self.count() * @sizeOf(Entry);
+
             return size;
         }
 
@@ -157,18 +167,38 @@ pub fn HashTable(comptime Value: type) type {
 
             var self = Self{ .header = header };
 
-            try readBitSet(u32, gpa, &self.present, reader);
+            var present = try readBitSet(u32, gpa, reader);
+            defer present.deinit(gpa);
 
-            if (self.present.count() != self.header.size) {
+            if (present.count() != self.header.size) {
                 log.err("Present bit vector does not the match size of hash table", .{});
                 return error.InvalidHashMap;
             }
 
-            try readBitSet(u32, gpa, &self.deleted, reader);
+            var deleted = try readBitSet(u32, gpa, reader);
+            defer deleted.deinit(gpa);
 
-            if (intersects(self.present, self.deleted)) {
+            if (intersects(present, deleted)) {
                 log.err("Buckets marked as both valid and deleted", .{});
                 return error.InvalidHashMap;
+            }
+
+            const bit_length = @max(present.bit_length, deleted.bit_length);
+
+            self.present = try DynamicBitSetUnmanaged.initEmpty(gpa, bit_length);
+            {
+                var i: usize = 0;
+                while (i < numMasks(usize, present.bit_length)) : (i += 1) {
+                    self.present.masks[i] = present.masks[i];
+                }
+            }
+
+            self.deleted = try DynamicBitSetUnmanaged.initEmpty(gpa, bit_length);
+            {
+                var i: usize = 0;
+                while (i < numMasks(usize, deleted.bit_length)) : (i += 1) {
+                    self.deleted.masks[i] = deleted.masks[i];
+                }
             }
 
             try self.buckets.resize(gpa, header.capacity);
@@ -197,10 +227,10 @@ fn intersects(lhs: DynamicBitSetUnmanaged, rhs: DynamicBitSetUnmanaged) bool {
     return false;
 }
 
-fn readBitSet(comptime Word: type, gpa: Allocator, bitset: *DynamicBitSetUnmanaged, reader: anytype) !void {
+fn readBitSet(comptime Word: type, gpa: Allocator, reader: anytype) !DynamicBitSetUnmanaged {
     const num_words = try reader.readIntLittle(Word);
     const bit_length = num_words * @bitSizeOf(Word);
-    bitset.* = try DynamicBitSetUnmanaged.initEmpty(gpa, bit_length);
+    var bitset = try DynamicBitSetUnmanaged.initEmpty(gpa, bit_length);
 
     var i: usize = 0;
     while (i < num_words) : (i += 1) {
@@ -212,6 +242,13 @@ fn readBitSet(comptime Word: type, gpa: Allocator, bitset: *DynamicBitSetUnmanag
             }
         }
     }
+
+    return bitset;
+}
+
+fn findLastSet(bitset: DynamicBitSetUnmanaged) ?usize {
+    var it = bitset.iterator(.{ .direction = .reverse });
+    return it.next();
 }
 
 test "roundtrip test - panic.pdb" {
@@ -226,7 +263,7 @@ test "roundtrip test - panic.pdb" {
     var table = try HashTable(u32).read(testing.allocator, reader);
     defer table.deinit(testing.allocator);
 
-    try testing.expectEqual(table.serializedSize(), buffer.len);
+    try testing.expectEqual(buffer.len, table.serializedSize());
 }
 
 test "roundtrip test - simple.pdb" {
@@ -238,5 +275,5 @@ test "roundtrip test - simple.pdb" {
     var table = try HashTable(u32).read(testing.allocator, reader);
     defer table.deinit(testing.allocator);
 
-    try testing.expectEqual(table.serializedSize(), buffer.len);
+    try testing.expectEqual(buffer.len - 4, table.serializedSize());
 }
