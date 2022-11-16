@@ -9,6 +9,7 @@ const mem = std.mem;
 const pdb = @import("pdb.zig");
 
 const Allocator = mem.Allocator;
+const MsfStream = StreamDirectory.MsfStream;
 const NamedStreamMap = @import("NamedStreamMap.zig");
 const StreamDirectory = @import("StreamDirectory.zig");
 
@@ -16,8 +17,23 @@ gpa: Allocator,
 data: []const u8,
 
 stream_dir: StreamDirectory,
-named_stream_map: ?NamedStreamMap = null,
+pdb_stream: ?PdbInfoStream = null,
 strtab: ?[]const u8 = null,
+
+const PdbInfoStream = struct {
+    stream: MsfStream,
+    named_stream_map: NamedStreamMap,
+    features_pos: u32,
+
+    fn getHeader(self: *const @This()) *align(1) const pdb.PdbStreamHeader {
+        return @ptrCast(*align(1) const pdb.PdbStreamHeader, self.stream.ptr);
+    }
+
+    fn getFeatures(self: @This()) []align(1) const pdb.PdbFeatureCode {
+        const num_features = @divExact(self.stream.len - self.features_pos, @sizeOf(pdb.PdbFeatureCode));
+        return @ptrCast([*]align(1) const pdb.PdbFeatureCode, self.stream.ptr + self.features_pos)[0..num_features];
+    }
+};
 
 pub fn parse(gpa: Allocator, file: fs.File) !PdbDump {
     const file_size = try file.getEndPos();
@@ -32,21 +48,44 @@ pub fn parse(gpa: Allocator, file: fs.File) !PdbDump {
 
     self.stream_dir = try StreamDirectory.parse(self.gpa, self.data, self.getMsfSuperBlock());
 
+    if (try self.stream_dir.getStreamAlloc(self.gpa, 1, .{
+        .data = self.data,
+        .block_size = self.getBlockSize(),
+    })) |msf_stream| {
+        var pdb_stream = PdbInfoStream{
+            .stream = msf_stream,
+            .named_stream_map = undefined,
+            .features_pos = 0,
+        };
+
+        var stream = std.io.fixedBufferStream(msf_stream);
+        var creader = std.io.countingReader(stream.reader());
+        const reader = creader.reader();
+
+        _ = try reader.readStruct(pdb.PdbStreamHeader);
+
+        pdb_stream.named_stream_map = try NamedStreamMap.read(self.gpa, reader);
+        pdb_stream.features_pos = @intCast(u32, creader.bytes_read);
+
+        self.pdb_stream = pdb_stream;
+    }
+
     return self;
 }
 
 pub fn deinit(self: *PdbDump) void {
     self.gpa.free(self.data);
     self.stream_dir.deinit(self.gpa);
-    if (self.named_stream_map) |*nsm| {
-        nsm.deinit();
+    if (self.pdb_stream) |*stream| {
+        self.gpa.free(stream.stream);
+        stream.named_stream_map.deinit();
     }
     if (self.strtab) |strtab| {
         self.gpa.free(strtab);
     }
 }
 
-pub fn printHeaders(self: *PdbDump, writer: anytype) !void {
+pub fn printMsfHeaders(self: *PdbDump, writer: anytype) !void {
     // TODO triggers no struct layout assert
     // if (self.data.len < @sizeOf(pdb.SuperBlock)) {
     if (self.data.len < 56) {
@@ -117,7 +156,10 @@ pub fn printHeaders(self: *PdbDump, writer: anytype) !void {
     }
 
     try writer.writeByte('\n');
-    try writer.writeAll("StreamDirectory\n");
+}
+
+pub fn printStreamDirectory(self: *const PdbDump, writer: anytype) !void {
+    try writer.writeAll("Stream Directory\n");
 
     const num_streams = self.stream_dir.getNumStreams();
     const stream_sizes = self.stream_dir.getStreamSizes();
@@ -144,72 +186,53 @@ pub fn printHeaders(self: *PdbDump, writer: anytype) !void {
     }
     try writer.writeByte('\n');
     try writer.writeByte('\n');
+}
 
-    if (try self.stream_dir.getStreamAlloc(self.gpa, 1, .{
-        .data = self.data,
-        .block_size = self.getBlockSize(),
-    })) |pdb_stream| {
-        defer self.gpa.free(pdb_stream);
-
-        var stream = std.io.fixedBufferStream(pdb_stream);
-        var creader = std.io.countingReader(stream.reader());
-        const reader = creader.reader();
-
-        try writer.writeAll("PDB Info Stream #1\n");
-        // PDBStream is at index #1
-        const header = try reader.readStruct(pdb.PdbStreamHeader);
-
-        inline for (@typeInfo(pdb.PdbStreamHeader).Struct.fields) |field| {
-            try writer.print("  {s: <16} ", .{field.name});
-
-            const value = @field(header, field.name);
-
-            if (comptime mem.eql(u8, field.name, "Version")) {
-                try writer.print("{s}", .{@tagName(value)});
-            } else if (comptime mem.eql(u8, field.name, "Guid")) {
-                try writer.print("{x}", .{std.fmt.fmtSliceHexLower(&value)});
-            } else {
-                try writer.print("{d}", .{value});
-            }
-
-            try writer.writeByte('\n');
-        }
-
-        self.named_stream_map = try NamedStreamMap.read(self.gpa, reader);
-
-        const num_features = @divExact(pdb_stream.len - creader.bytes_read, @sizeOf(pdb.PdbFeatureCode));
-        const features = try self.gpa.alloc(pdb.PdbFeatureCode, num_features);
-        defer self.gpa.free(features);
-        _ = try reader.readAll(@ptrCast([*]u8, features.ptr)[0 .. num_features * @sizeOf(pdb.PdbFeatureCode)]);
-
-        try writer.print("  {s: <16} ", .{"Features"});
-        for (features) |feature| {
-            try writer.print("{}, ", .{feature});
-        }
-        try writer.writeByte('\n');
-
-        try writer.writeAll("  Named Streams\n");
-
-        var nsm_it = self.named_stream_map.?.iterator();
-        while (nsm_it.next()) |name| {
-            const stream_index = self.named_stream_map.?.get(name).?;
-            try writer.print("    {s: <16}\n", .{name});
-            try writer.print("      {s: <16} {x}\n", .{ "Index", stream_index });
-            try writer.print("      {s: <16} {x}\n", .{ "Size (bytes)", self.stream_dir.getStreamSizes()[stream_index] });
-        }
-    } else {
+pub fn printPdbInfoStream(self: *const PdbDump, writer: anytype) !void {
+    const pdb_stream = self.pdb_stream orelse {
         try writer.writeAll("No PDB Info Stream found.\n");
+        return;
+    };
+
+    try writer.writeAll("PDB Info Stream #1\n");
+
+    const header = pdb_stream.getHeader();
+
+    inline for (@typeInfo(pdb.PdbStreamHeader).Struct.fields) |field| {
+        try writer.print("  {s: <16} ", .{field.name});
+
+        const value = @field(header, field.name);
+
+        if (comptime mem.eql(u8, field.name, "Version")) {
+            try writer.print("{s}", .{@tagName(value)});
+        } else if (comptime mem.eql(u8, field.name, "Guid")) {
+            try writer.print("{x}", .{std.fmt.fmtSliceHexLower(&value)});
+        } else {
+            try writer.print("{d}", .{value});
+        }
+
+        try writer.writeByte('\n');
     }
 
-    if (self.getNamesStreamIndex()) |stream_index| blk: {
-        const stream = (try self.stream_dir.getStreamAlloc(self.gpa, stream_index, .{
-            .data = self.data,
-            .block_size = self.getBlockSize(),
-        })) orelse break :blk;
-        defer self.gpa.free(stream);
+    const features = pdb_stream.getFeatures();
 
-        log.warn("{x}", .{std.fmt.fmtSliceEscapeLower(stream)});
+    try writer.print("  {s: <16} ", .{"Features"});
+    for (features) |feature| {
+        try writer.print("{}, ", .{feature});
     }
+    try writer.writeByte('\n');
+
+    try writer.writeAll("  Named Streams\n");
+
+    var nsm_it = pdb_stream.named_stream_map.iterator();
+    while (nsm_it.next()) |name| {
+        const stream_index = pdb_stream.named_stream_map.get(name).?;
+        try writer.print("    {s: <16}\n", .{name});
+        try writer.print("      {s: <16} {x}\n", .{ "Index", stream_index });
+        try writer.print("      {s: <16} {x}\n", .{ "Size (bytes)", self.stream_dir.getStreamSizes()[stream_index] });
+    }
+
+    try writer.writeByte('\n');
 }
 
 fn getMsfSuperBlock(self: *const PdbDump) *align(1) const pdb.SuperBlock {
@@ -237,9 +260,4 @@ const FreeBlockMapIterator = struct {
 
 fn getMsfFreeBlockMapIterator(self: *const PdbDump) FreeBlockMapIterator {
     return .{ .self = self };
-}
-
-fn getNamesStreamIndex(self: *const PdbDump) ?u32 {
-    const nsm = self.named_stream_map orelse return null;
-    return nsm.get("/names");
 }
