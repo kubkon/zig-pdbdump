@@ -167,25 +167,25 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
         var named_stream_map = try NamedStreamMap.read(self.gpa, reader);
         defer named_stream_map.deinit();
 
-        var nsm_it = named_stream_map.iterator();
-        while (nsm_it.next()) |name| {
-            const stream_index = named_stream_map.getStreamIndex(name).?;
-            log.warn("stream '{s}' at index #{x}", .{ name, stream_index });
-        }
-
-        if (named_stream_map.getStreamIndex("/TMCache")) |stream_index| {
-            log.warn("stream '/TMCache' at index #{x}", .{stream_index});
-        } else {
-            log.warn("stream '/TMCache' not found", .{});
-        }
-
         const num_features = @divExact(pdb_stream.len - creader.bytes_read, @sizeOf(pdb.PdbFeatureCode));
         const features = try self.gpa.alloc(pdb.PdbFeatureCode, num_features);
         defer self.gpa.free(features);
         _ = try reader.readAll(@ptrCast([*]u8, features.ptr)[0 .. num_features * @sizeOf(pdb.PdbFeatureCode)]);
 
+        try writer.print("  {s: <16} ", .{"Features"});
         for (features) |feature| {
-            log.warn("feature = {}", .{feature});
+            try writer.print("{}, ", .{feature});
+        }
+        try writer.writeByte('\n');
+
+        try writer.writeAll("  Named Streams\n");
+
+        var nsm_it = named_stream_map.iterator();
+        while (nsm_it.next()) |name| {
+            const stream_index = named_stream_map.getStreamIndex(name).?;
+            try writer.print("    {s: <16}\n", .{name});
+            try writer.print("      {s: <16} {x}\n", .{ "Index", stream_index });
+            try writer.print("      {s: <16} {x}\n", .{ "Size (bytes)", stream_dir.getStreamSizes()[stream_index] });
         }
     } else {
         try writer.writeAll("No PDB Info Stream found.\n");
