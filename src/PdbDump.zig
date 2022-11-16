@@ -165,7 +165,7 @@ pub fn printHeaders(self: *const PdbDump, writer: anytype) !void {
         }
 
         var named_stream_map = try NamedStreamMap.read(self.gpa, reader);
-        defer named_stream_map.deinit(self.gpa);
+        defer named_stream_map.deinit();
 
         var nsm_it = named_stream_map.iterator();
         while (nsm_it.next()) |name| {
@@ -318,16 +318,17 @@ fn stitchBlocks(blocks: []align(1) const u32, buffer: []u8, ctx: Ctx) void {
 }
 
 const NamedStreamMap = struct {
+    gpa: Allocator,
     strtab: std.ArrayListUnmanaged(u8) = .{},
-    hash_table: HashTable(u32) = .{},
+    hash_table: HashTable(u32),
 
-    fn deinit(self: *NamedStreamMap, gpa: Allocator) void {
-        self.strtab.deinit(gpa);
-        self.hash_table.deinit(gpa);
+    fn deinit(self: *NamedStreamMap) void {
+        self.strtab.deinit(self.gpa);
+        self.hash_table.deinit(self.gpa);
     }
 
     pub const HashContext = struct {
-        map: *const NamedStreamMap,
+        map: *NamedStreamMap,
 
         pub fn hash(ctx: @This(), key: []const u8) u32 {
             _ = ctx;
@@ -335,22 +336,34 @@ const NamedStreamMap = struct {
             return @truncate(u16, hash_table.hashStringV1(key));
         }
 
+        pub fn eql(ctx: @This(), key1: []const u8, key2: []const u8) bool {
+            _ = ctx;
+            return mem.eql(u8, key1, key2);
+        }
+
         pub fn getKeyAdapted(ctx: @This(), offset: u32) ?[]const u8 {
             if (offset > ctx.map.strtab.items.len) return null;
             return mem.sliceTo(@ptrCast([*:0]u8, ctx.map.strtab.items.ptr + offset), 0);
         }
+
+        pub fn putKeyAdapted(ctx: @This(), key: []const u8) error{OutOfMemory}!u32 {
+            const adapted = @intCast(u32, ctx.map.strtab.items.len);
+            try ctx.strtab.ensureUnusedCapacity(ctx.map.gpa, key.len + 1);
+            ctx.strtab.appendSliceAssumeCapacity(key);
+            ctx.strtab.appendAssumeCapacity(0);
+            return adapted;
+        }
     };
 
-    fn getStreamIndex(self: NamedStreamMap, key: []const u8) ?u32 {
-        const res = self.hash_table.getIndexOrFirstUnused([]const u8, HashContext, key, .{ .map = &self });
-        if (!res.existing) {
-            return null;
-        }
-        return self.hash_table.buckets.items[res.index].value;
+    fn getStreamIndex(self: *NamedStreamMap, key: []const u8) ?u32 {
+        return self.hash_table.get([]const u8, HashContext, key, .{ .map = self });
     }
 
     fn read(gpa: Allocator, reader: anytype) !NamedStreamMap {
-        var map = NamedStreamMap{};
+        var map = NamedStreamMap{
+            .gpa = gpa,
+            .hash_table = undefined,
+        };
 
         const strtab_len = try reader.readIntLittle(u32);
         try map.strtab.resize(gpa, strtab_len);

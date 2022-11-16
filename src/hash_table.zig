@@ -83,7 +83,7 @@ pub fn hashStringV2(str: []const u8) u32 {
 /// https://llvm.org/docs/PDB/HashTable.html
 pub fn HashTable(comptime Value: type) type {
     return struct {
-        header: Header = .{ .size = 0, .capacity = 0 },
+        header: Header,
         buckets: std.ArrayListUnmanaged(Entry) = .{},
         present: DynamicBitSetUnmanaged = .{},
         deleted: DynamicBitSetUnmanaged = .{},
@@ -100,84 +100,51 @@ pub fn HashTable(comptime Value: type) type {
             value: Value,
         };
 
+        pub fn init(gpa: Allocator) error{OutOfMemory}!Self {
+            return initWithCapacity(gpa, 8);
+        }
+
+        pub fn initWithCapacity(gpa: Allocator, capacity: u32) error{OutOfMemory}!Self {
+            assert(capacity > 0);
+            var self = Self{ .header = .{
+                .size = 0,
+                .capacity = capacity,
+            } };
+            try self.buckets.resize(gpa, self.header.capacity);
+            self.present = try DynamicBitSetUnmanaged.initEmpty(gpa, self.header.capacity);
+            self.deleted = try DynamicBitSetUnmanaged.initEmpty(gpa, self.header.capacity);
+            return self;
+        }
+
         pub fn deinit(self: *Self, gpa: Allocator) void {
             self.buckets.deinit(gpa);
             self.present.deinit(gpa);
             self.deleted.deinit(gpa);
+            self.* = undefined;
         }
 
         /// Returns the number of values present in the HashTable.
-        pub fn count(self: Self) usize {
-            return self.present.count();
+        pub fn count(self: Self) u32 {
+            return self.header.size;
         }
 
-        const GetIndexOrFirstUnused = struct {
-            existing: bool,
-            index: u32,
-        };
+        /// Returns the corresponding `Value` for `key` if one exists.
+        pub fn get(self: Self, comptime Key: type, comptime Context: type, key: Key, ctx: Context) ?Value {
+            const res = self.getIndexOrFirstUnused(Key, Context, key, ctx);
+            return if (res.existing) self.buckets.items[res.index].value else null;
+        }
 
-        /// If the `key` exists in the HashTable, returns `index` to the bucket holding the `value`.
-        /// In this case, `existing` is set to `true`.
-        /// If the `key` doesn't exist, returns `index` to the first available bucket.
-        /// In this case, `existing` is set to `false`.
-        pub fn getIndexOrFirstUnused(
-            self: Self,
+        /// Inserts or updates value for key `key`.
+        pub fn put(
+            self: *Self,
             comptime Key: type,
             comptime Context: type,
+            gpa: Allocator,
             key: Key,
+            value: Value,
             ctx: Context,
-        ) GetIndexOrFirstUnused {
-            const hash_bucket = ctx.hash(key) % self.header.capacity;
-            var index = hash_bucket;
-            var first_unused: ?u32 = null;
-
-            while (true) {
-                if (self.present.isSet(index)) {
-                    if (ctx.getKeyAdapted(self.buckets.items[index].key)) |okey| {
-                        if (mem.eql(u8, okey, key)) {
-                            return .{
-                                .existing = true,
-                                .index = index,
-                            };
-                        }
-                    }
-                } else {
-                    if (first_unused == null) {
-                        first_unused = index;
-                    }
-
-                    if (!self.deleted.isSet(index)) {
-                        break;
-                    }
-                }
-
-                index = (index + 1) % self.header.capacity;
-                if (index == hash_bucket) break;
-            }
-
-            assert(first_unused != null);
-            return .{
-                .existing = false,
-                .index = first_unused.?,
-            };
-        }
-
-        /// Returns the corresponding for `key`.
-        /// Asserts `key` exists in the HashTable.
-        /// If there exists possibility of the `key` not existing in the HashTable, use `getIndexOrFindFirst` instead.
-        /// This maches the implementation of the HashTable found in LLVM's sources.
-        pub fn get(self: Self, comptime Key: type, comptime Context: type, key: Key, ctx: Context) Value {
-            const res = self.getIndexOrFirstUnused(Key, Context, key, ctx);
-            assert(res.existing);
-            return self.buckets.items[res.index].value;
-        }
-
-        fn maxLoad(capacity: u32) u32 {
-            return capacity * 2 / 3 + 1;
-        }
-
-        inline fn numMasks(comptime Word: type, bit_length: usize) usize {
-            return (bit_length + (@bitSizeOf(Word) - 1)) / @bitSizeOf(Word);
+        ) PutError(Context)!void {
+            return self.putInternal(Key, Context, gpa, key, value, null, ctx);
         }
 
         /// Calculates required number of bytes to serialize the HashTable
@@ -280,6 +247,132 @@ pub fn HashTable(comptime Value: type) type {
                 try writer.writeIntLittle(u32, entry.key);
                 try writer.writeAll(@ptrCast([*]const u8, &entry.value)[0..@sizeOf(Value)]);
             }
+        }
+
+        const GetIndexOrFirstUnused = struct {
+            existing: bool,
+            index: u32,
+        };
+
+        /// If the `key` exists in the HashTable, returns `index` to the bucket holding the `value`.
+        /// In this case, `existing` is set to `true`.
+        /// If the `key` doesn't exist, returns `index` to the first available bucket.
+        /// In this case, `existing` is set to `false`.
+        fn getIndexOrFirstUnused(
+            self: Self,
+            comptime Key: type,
+            comptime Context: type,
+            key: Key,
+            ctx: Context,
+        ) GetIndexOrFirstUnused {
+            const hash_bucket = ctx.hash(key) % self.header.capacity;
+            var index = hash_bucket;
+            var first_unused: ?u32 = null;
+
+            while (true) {
+                if (self.present.isSet(index)) {
+                    if (ctx.getKeyAdapted(self.buckets.items[index].key)) |okey| {
+                        if (ctx.eql(okey, key)) {
+                            return .{
+                                .existing = true,
+                                .index = index,
+                            };
+                        }
+                    }
+                } else {
+                    if (first_unused == null) {
+                        first_unused = index;
+                    }
+
+                    if (!self.deleted.isSet(index)) {
+                        break;
+                    }
+                }
+
+                index = (index + 1) % self.header.capacity;
+                if (index == hash_bucket) break;
+            }
+
+            assert(first_unused != null);
+            return .{
+                .existing = false,
+                .index = first_unused.?,
+            };
+        }
+
+        fn PutError(comptime Context: type) type {
+            if (@hasDecl(Context, "putKeyAdapted")) {
+                const ret = @typeInfo(@TypeOf(Context.putKeyAdapted)).Fn.return_type.?;
+                const err = @typeInfo(ret).ErrorUnion.error_set;
+                return error{OutOfMemory} || err;
+            }
+            @compileError("putKeyAdapted method not found");
+        }
+
+        fn putInternal(
+            self: *Self,
+            comptime Key: type,
+            comptime Context: type,
+            gpa: Allocator,
+            key: Key,
+            value: Value,
+            adapted: ?u32,
+            ctx: Context,
+        ) PutError(Context)!void {
+            const res = self.getIndexOrFirstUnused(Key, Context, key, ctx);
+            const entry = &self.buckets.items[res.index];
+            if (res.existing) {
+                assert(self.present.isSet(res.index));
+                assert(ctx.eql(ctx.getKeyAdapted(entry.key).?, key));
+                entry.value = value;
+            } else {
+                assert(!self.present.isSet(res.index));
+                entry.key = adapted orelse try ctx.putKeyAdapted(key);
+                entry.value = value;
+
+                self.present.set(res.index);
+                self.deleted.unset(res.index);
+                self.header.size += 1;
+
+                if (self.header.size >= maxLoad(self.header.capacity)) {
+                    try self.grow(Key, Context, gpa, ctx);
+                }
+            }
+        }
+
+        fn grow(
+            self: *Self,
+            comptime Key: type,
+            comptime Context: type,
+            gpa: Allocator,
+            ctx: Context,
+        ) PutError(Context)!void {
+            assert(self.header.capacity < std.math.maxInt(u32)); // Capacity at max, cannot grow!
+
+            const new_capacity = if (self.header.capacity <= std.math.maxInt(u32))
+                maxLoad(self.header.capacity) * 2
+            else
+                std.math.maxInt(u32);
+
+            var table = try Self.initWithCapacity(gpa, new_capacity);
+            defer table.deinit(gpa);
+
+            var present = self.present.iterator(.{});
+            while (present.next()) |index| {
+                const entry = self.buckets.items[index];
+                const key = ctx.getKeyAdapted(entry.key).?;
+                try table.putInternal(Key, Context, gpa, key, entry.value, entry.key, ctx);
+            }
+
+            mem.swap(Self, self, &table);
+        }
+
+        inline fn maxLoad(capacity: u32) u32 {
+            return capacity * 2 / 3 + 1;
+        }
+
+        inline fn numMasks(comptime Word: type, bit_length: usize) usize {
+            return (bit_length + (@bitSizeOf(Word) - 1)) / @bitSizeOf(Word);
         }
     };
 }
@@ -395,6 +488,11 @@ const StringContext = struct {
         return @truncate(u16, hashStringV1(key));
     }
 
+    pub fn eql(ctx: @This(), key1: []const u8, key2: []const u8) bool {
+        _ = ctx;
+        return mem.eql(u8, key1, key2);
+    }
+
     pub fn getKeyAdapted(ctx: @This(), adapted: u32) ?[]const u8 {
         if (adapted > ctx.strtab.items.len) return null;
         return mem.sliceTo(@ptrCast([*:0]u8, ctx.strtab.items.ptr + adapted), 0);
@@ -409,7 +507,7 @@ const StringContext = struct {
     }
 };
 
-test "get by key" {
+test "getIndexOrFirstUnused" {
     const buffer: []const u8 =
         "\x02\x00\x00\x00\x04\x00\x00\x00" ++
         "\x01\x00\x00\x00\x06\x00\x00\x00" ++
@@ -451,4 +549,73 @@ test "get by key" {
 
     res = table.getIndexOrFirstUnused([]const u8, StringContext, "/TMCache", ctx);
     try testing.expect(!res.existing);
+}
+
+test "grow" {
+    var table = try HashTable(u32).initWithCapacity(testing.allocator, 1);
+    defer table.deinit(testing.allocator);
+
+    var strtab = std.ArrayList(u8).init(testing.allocator);
+    defer strtab.deinit();
+
+    const ctx = StringContext{ .strtab = &strtab };
+
+    try testing.expectEqual(@as(u32, 1), table.header.capacity);
+
+    try table.put([]const u8, StringContext, testing.allocator, "/LinkInfo", 0x5, ctx);
+    try testing.expectEqual(@as(u32, 2), table.header.capacity);
+    try testing.expect(table.header.size < HashTable(u32).maxLoad(table.header.capacity));
+
+    try table.put([]const u8, StringContext, testing.allocator, "/names", 0xf, ctx);
+    try testing.expectEqual(@as(u32, 4), table.header.capacity);
+    try testing.expect(table.header.size < HashTable(u32).maxLoad(table.header.capacity));
+
+    try table.put([]const u8, StringContext, testing.allocator, "/TMCache", 0x6, ctx);
+    try testing.expectEqual(@as(u32, 6), table.header.capacity);
+    try testing.expect(table.header.size < HashTable(u32).maxLoad(table.header.capacity));
+
+    try table.put([]const u8, StringContext, testing.allocator, "/sources", 0xe, ctx);
+    try testing.expectEqual(@as(u32, 6), table.header.capacity);
+    try testing.expect(table.header.size < HashTable(u32).maxLoad(table.header.capacity));
+}
+
+test "basic operations" {
+    var table = try HashTable(u32).initWithCapacity(testing.allocator, 1);
+    defer table.deinit(testing.allocator);
+
+    var strtab = std.ArrayList(u8).init(testing.allocator);
+    defer strtab.deinit();
+
+    const ctx = StringContext{ .strtab = &strtab };
+
+    try table.put([]const u8, StringContext, testing.allocator, "/LinkInfo", 0x5, ctx);
+    try table.put([]const u8, StringContext, testing.allocator, "/names", 0xf, ctx);
+
+    var value = table.get([]const u8, StringContext, "/names", ctx);
+    try testing.expect(value != null);
+    try testing.expectEqual(value.?, 0xf);
+
+    value = table.get([]const u8, StringContext, "/LinkInfo", ctx);
+    try testing.expect(value != null);
+    try testing.expectEqual(value.?, 0x5);
+
+    value = table.get([]const u8, StringContext, "/TMCache", ctx);
+    try testing.expect(value == null);
+
+    const expected: []const u8 =
+        "\x02\x00\x00\x00\x04\x00\x00\x00" ++
+        "\x01\x00\x00\x00\x06\x00\x00\x00" ++
+        "\x00\x00\x00\x00\x0a\x00\x00\x00" ++
+        "\x0f\x00\x00\x00\x00\x00\x00\x00" ++
+        "\x05\x00\x00\x00";
+
+    try testing.expectEqual(expected.len, table.serializedSize());
+
+    var output = std.ArrayList(u8).init(testing.allocator);
+    defer output.deinit();
+    try output.ensureTotalCapacityPrecise(table.serializedSize());
+
+    try table.write(output.writer());
+
+    try testing.expectEqualStrings(expected, output.items);
 }
