@@ -10,11 +10,14 @@ const pdb = @import("pdb.zig");
 
 const Allocator = mem.Allocator;
 const NamedStreamMap = @import("NamedStreamMap.zig");
+const StreamDirectory = @import("StreamDirectory.zig");
 
 gpa: Allocator,
 data: []const u8,
 
+stream_dir: StreamDirectory,
 named_stream_map: ?NamedStreamMap = null,
+strtab: ?[]const u8 = null,
 
 pub fn parse(gpa: Allocator, file: fs.File) !PdbDump {
     const file_size = try file.getEndPos();
@@ -24,16 +27,22 @@ pub fn parse(gpa: Allocator, file: fs.File) !PdbDump {
     var self = PdbDump{
         .gpa = gpa,
         .data = data,
+        .stream_dir = undefined,
     };
+
+    self.stream_dir = try StreamDirectory.parse(self.gpa, self.data, self.getMsfSuperBlock());
 
     return self;
 }
 
 pub fn deinit(self: *PdbDump) void {
     self.gpa.free(self.data);
-
-    if (self.named_stream_map) |*nms| {
-        nms.deinit();
+    self.stream_dir.deinit(self.gpa);
+    if (self.named_stream_map) |*nsm| {
+        nsm.deinit();
+    }
+    if (self.strtab) |strtab| {
+        self.gpa.free(strtab);
     }
 }
 
@@ -110,11 +119,8 @@ pub fn printHeaders(self: *PdbDump, writer: anytype) !void {
     try writer.writeByte('\n');
     try writer.writeAll("StreamDirectory\n");
 
-    const stream_dir = try self.getStreamDirectory();
-    defer stream_dir.deinit(self.gpa);
-
-    const num_streams = stream_dir.getNumStreams();
-    const stream_sizes = stream_dir.getStreamSizes();
+    const num_streams = self.stream_dir.getNumStreams();
+    const stream_sizes = self.stream_dir.getStreamSizes();
 
     try writer.print("  {s: <16} {x}\n", .{ "NumStreams", num_streams });
     try writer.print("  {s: <16} ", .{"StreamSizes"});
@@ -128,9 +134,9 @@ pub fn printHeaders(self: *PdbDump, writer: anytype) !void {
     while (i < num_streams) : (i += 1) {
         try writer.writeByte('\n');
         try writer.print("    #{x}: ", .{i});
-        const blocks = stream_dir.getStreamBlocks(i, .{
+        const blocks = self.stream_dir.getStreamBlocks(i, .{
             .data = self.data,
-            .block_size = super_block.BlockSize,
+            .block_size = self.getBlockSize(),
         }).?;
         for (blocks) |block| {
             try writer.print("{x} ", .{block});
@@ -139,9 +145,9 @@ pub fn printHeaders(self: *PdbDump, writer: anytype) !void {
     try writer.writeByte('\n');
     try writer.writeByte('\n');
 
-    if (try stream_dir.streamAtAlloc(self.gpa, 1, .{
+    if (try self.stream_dir.getStreamAlloc(self.gpa, 1, .{
         .data = self.data,
-        .block_size = super_block.BlockSize,
+        .block_size = self.getBlockSize(),
     })) |pdb_stream| {
         defer self.gpa.free(pdb_stream);
 
@@ -189,15 +195,29 @@ pub fn printHeaders(self: *PdbDump, writer: anytype) !void {
             const stream_index = self.named_stream_map.?.get(name).?;
             try writer.print("    {s: <16}\n", .{name});
             try writer.print("      {s: <16} {x}\n", .{ "Index", stream_index });
-            try writer.print("      {s: <16} {x}\n", .{ "Size (bytes)", stream_dir.getStreamSizes()[stream_index] });
+            try writer.print("      {s: <16} {x}\n", .{ "Size (bytes)", self.stream_dir.getStreamSizes()[stream_index] });
         }
     } else {
         try writer.writeAll("No PDB Info Stream found.\n");
+    }
+
+    if (self.getNamesStreamIndex()) |stream_index| blk: {
+        const stream = (try self.stream_dir.getStreamAlloc(self.gpa, stream_index, .{
+            .data = self.data,
+            .block_size = self.getBlockSize(),
+        })) orelse break :blk;
+        defer self.gpa.free(stream);
+
+        log.warn("{x}", .{std.fmt.fmtSliceEscapeLower(stream)});
     }
 }
 
 fn getMsfSuperBlock(self: *const PdbDump) *align(1) const pdb.SuperBlock {
     return @ptrCast(*align(1) const pdb.SuperBlock, self.data.ptr);
+}
+
+fn getBlockSize(self: PdbDump) u32 {
+    return self.getMsfSuperBlock().BlockSize;
 }
 
 const Block = []const u8;
@@ -219,104 +239,7 @@ fn getMsfFreeBlockMapIterator(self: *const PdbDump) FreeBlockMapIterator {
     return .{ .self = self };
 }
 
-const Ctx = struct {
-    data: []align(1) const u8,
-    block_size: u32,
-};
-
-const StreamDirectory = struct {
-    stream: MsfStream,
-
-    const invalid_stream: u32 = @bitCast(u32, @as(i32, -1));
-
-    fn deinit(dir: StreamDirectory, gpa: Allocator) void {
-        gpa.free(dir.stream);
-    }
-
-    fn getNumStreams(dir: StreamDirectory) u32 {
-        return @ptrCast(*align(1) const u32, dir.stream.ptr).*;
-    }
-
-    fn getStreamSizes(dir: StreamDirectory) []align(1) const u32 {
-        const num_streams = dir.getNumStreams();
-        return @ptrCast([*]align(1) const u32, dir.stream.ptr + @sizeOf(u32))[0..num_streams];
-    }
-
-    fn getStreamBlocks(dir: StreamDirectory, index: usize, ctx: Ctx) ?[]align(1) const u32 {
-        const num_streams = dir.getNumStreams();
-        if (index >= num_streams) return null;
-
-        const stream_sizes = dir.getStreamSizes();
-        const stream_size = stream_sizes[index];
-        if (stream_size == invalid_stream or stream_size == 0) return &[0]u32{};
-
-        const num_blocks = ceil(u32, stream_size, ctx.block_size);
-
-        const total_prev_num_blocks = blk: {
-            var sum: u32 = 0;
-            var i: usize = 0;
-            while (i < index) : (i += 1) {
-                var prev_size = stream_sizes[i];
-                if (prev_size == invalid_stream) prev_size = 0;
-                sum += ceil(u32, prev_size, ctx.block_size);
-            }
-            break :blk sum;
-        };
-
-        const pos = @sizeOf(u32) * (stream_sizes.len + 1 + total_prev_num_blocks);
-        return @ptrCast([*]align(1) const u32, dir.stream.ptr + pos)[0..num_blocks];
-    }
-
-    fn streamAtAlloc(dir: StreamDirectory, gpa: Allocator, index: usize, ctx: Ctx) error{OutOfMemory}!?MsfStream {
-        const blocks = dir.getStreamBlocks(index, ctx) orelse return null;
-        const size = dir.getStreamSizes()[index];
-
-        const buffer = try gpa.alloc(u8, size);
-
-        stitchBlocks(blocks, buffer, ctx);
-
-        return buffer;
-    }
-};
-
-inline fn ceil(comptime T: type, num: T, div: T) T {
-    return @divTrunc(num, div) + @boolToInt(@rem(num, div) > 0);
-}
-
-fn getStreamDirectory(self: *const PdbDump) error{OutOfMemory}!StreamDirectory {
-    const super_block = self.getMsfSuperBlock();
-    const pos = super_block.BlockMapAddr * super_block.BlockSize;
-    const num = ceil(u32, super_block.NumDirectoryBytes, super_block.BlockSize);
-    const blocks = @ptrCast([*]align(1) const u32, self.data.ptr + pos)[0..num];
-
-    const buffer = try self.gpa.alloc(u8, super_block.NumDirectoryBytes);
-
-    stitchBlocks(blocks, buffer, .{
-        .data = self.data,
-        .block_size = super_block.BlockSize,
-    });
-
-    return StreamDirectory{ .stream = buffer };
-}
-
-pub const MsfStream = []const u8;
-
-fn stitchBlocks(blocks: []align(1) const u32, buffer: []u8, ctx: Ctx) void {
-    // Stitch together blocks belonging to the MsfStream.
-    var out = buffer;
-    var block_index: usize = 0;
-    var init_pos = blocks[block_index] * ctx.block_size;
-    const init_len = @min(buffer.len, ctx.block_size);
-    mem.copy(u8, out, ctx.data[init_pos..][0..init_len]);
-    out = out[init_len..];
-
-    var leftover = buffer.len - init_len;
-    while (leftover > 0) {
-        block_index += 1;
-        const next_pos = blocks[block_index] * ctx.block_size;
-        const copy_len = @min(leftover, ctx.block_size);
-        mem.copy(u8, out, ctx.data[next_pos..][0..copy_len]);
-        out = out[copy_len..];
-        leftover -= copy_len;
-    }
+fn getNamesStreamIndex(self: *const PdbDump) ?u32 {
+    const nsm = self.named_stream_map orelse return null;
+    return nsm.get("/names");
 }
