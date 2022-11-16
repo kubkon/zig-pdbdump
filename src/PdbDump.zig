@@ -164,28 +164,70 @@ pub fn printStreamDirectory(self: *const PdbDump, writer: anytype) !void {
     const num_streams = self.stream_dir.getNumStreams();
     const stream_sizes = self.stream_dir.getStreamSizes();
 
-    try writer.print("  {s: <16} {x}\n", .{ "NumStreams", num_streams });
-    try writer.print("  {s: <16} ", .{"StreamSizes"});
-    for (stream_sizes) |size| {
-        try writer.print("{x} ", .{size});
-    }
-    try writer.writeByte('\n');
-    try writer.print("  {s: <16} ", .{"StreamBlocks"});
-
-    var i: usize = 0;
+    var i: u32 = 0;
     while (i < num_streams) : (i += 1) {
-        try writer.writeByte('\n');
-        try writer.print("    #{x}: ", .{i});
+        try writer.print("    Stream #{x: >3} ({x: >6} bytes): [{}]\n", .{
+            i,
+            stream_sizes[i],
+            self.fmtStreamName(i),
+        });
         const blocks = self.stream_dir.getStreamBlocks(i, .{
             .data = self.data,
             .block_size = self.getBlockSize(),
         }).?;
-        for (blocks) |block| {
+
+        try writer.writeAll("      Blocks:");
+        for (blocks) |block, block_i| {
+            if (block_i % 20 == 0) {
+                try writer.writeAll("\n        ");
+            }
             try writer.print("{x} ", .{block});
         }
+        try writer.writeAll("\n\n");
     }
     try writer.writeByte('\n');
-    try writer.writeByte('\n');
+}
+
+const PrintStreamNameArgs = struct {
+    ctx: *const PdbDump,
+    index: u32,
+};
+
+fn getAndPrintStreamName(
+    val: PrintStreamNameArgs,
+    comptime fmt: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    comptime assert(fmt.len == 0);
+
+    switch (val.index) {
+        0 => return writer.writeAll("Old MSF Directory"),
+        1 => return writer.writeAll("PDB Info Stream"),
+        2 => return writer.writeAll("TPI Stream"),
+        3 => return writer.writeAll("DBI Stream"),
+        4 => return writer.writeAll("IPI Stream"),
+        else => {},
+    }
+
+    if (val.ctx.pdb_stream) |pdb_stream| {
+        var it = pdb_stream.named_stream_map.iterator();
+        while (it.next()) |name| {
+            if (pdb_stream.named_stream_map.get(name).? == val.index) {
+                return writer.print("Named Stream \"{s}\"", .{name});
+            }
+        }
+    }
+
+    return writer.writeAll("???");
+}
+
+fn fmtStreamName(self: *const PdbDump, index: u32) std.fmt.Formatter(getAndPrintStreamName) {
+    return .{ .data = .{
+        .ctx = self,
+        .index = index,
+    } };
 }
 
 pub fn printPdbInfoStream(self: *const PdbDump, writer: anytype) !void {
