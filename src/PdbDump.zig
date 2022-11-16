@@ -348,9 +348,9 @@ const NamedStreamMap = struct {
 
         pub fn putKeyAdapted(ctx: @This(), key: []const u8) error{OutOfMemory}!u32 {
             const adapted = @intCast(u32, ctx.map.strtab.items.len);
-            try ctx.strtab.ensureUnusedCapacity(ctx.map.gpa, key.len + 1);
-            ctx.strtab.appendSliceAssumeCapacity(key);
-            ctx.strtab.appendAssumeCapacity(0);
+            try ctx.map.strtab.ensureUnusedCapacity(ctx.map.gpa, key.len + 1);
+            ctx.map.strtab.appendSliceAssumeCapacity(key);
+            ctx.map.strtab.appendAssumeCapacity(0);
             return adapted;
         }
     };
