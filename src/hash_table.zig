@@ -130,6 +130,7 @@ pub fn HashTable(comptime Value: type) type {
 
         /// Returns the corresponding `Value` for `key` if one exists.
         pub fn get(self: Self, comptime Key: type, comptime Context: type, key: Key, ctx: Context) ?Value {
+            comptime verifyContext(Key, Context);
             const res = self.getIndexOrFirstUnused(Key, Context, key, ctx);
             return if (res.existing) self.buckets.items[res.index].value else null;
         }
@@ -144,6 +145,7 @@ pub fn HashTable(comptime Value: type) type {
             value: Value,
             ctx: Context,
         ) PutError(Context)!void {
+            comptime verifyContext(Key, Context);
             return self.putInternal(Key, Context, gpa, key, value, null, ctx);
         }
 
@@ -246,6 +248,95 @@ pub fn HashTable(comptime Value: type) type {
                 const entry = self.buckets.items[index];
                 try writer.writeIntLittle(u32, entry.key);
                 try writer.writeAll(@ptrCast([*]const u8, &entry.value)[0..@sizeOf(Value)]);
+            }
+        }
+
+        fn verifyContext(comptime Key: type, comptime Context: type) void {
+            switch (@typeInfo(Context)) {
+                .Struct => {},
+                else => |other| @compileError("Invalid Context: expected struct, found " ++ @typeName(other)),
+            }
+
+            if (@hasDecl(Context, "hash")) {
+                verifyMethod("hash", Context.hash, &[_]type{ Context, Key }, .{ .tt = u32 });
+            } else @compileError("missing required method 'hash'");
+
+            if (@hasDecl(Context, "eql")) {
+                verifyMethod("eql", Context.eql, &[_]type{ Context, Key, Key }, .{ .tt = bool });
+            } else @compileError("missing required method 'eql'");
+
+            if (@hasDecl(Context, "getKeyAdapted")) {
+                verifyMethod("getKeyAdapted", Context.getKeyAdapted, &[_]type{ Context, u32 }, .{
+                    .tag = .optional,
+                    .tt = Key,
+                });
+            } else @compileError("missing required method 'getKeyAdapted'");
+
+            if (@hasDecl(Context, "putKeyAdapted")) {
+                verifyMethod("putKeyAdapted", Context.putKeyAdapted, &[_]type{ Context, Key }, .{
+                    .tag = .error_union,
+                    .tt = u32,
+                });
+            } else @compileError("missing required method 'putKeyAdapted'");
+        }
+
+        const Ret = struct {
+            tag: enum { none, optional, error_union } = .none,
+            tt: type,
+        };
+
+        fn verifyMethod(
+            comptime name: []const u8,
+            comptime Fn: anytype,
+            comptime params: []const type,
+            comptime ret: Ret,
+        ) void {
+            const func = switch (@typeInfo(@TypeOf(Fn))) {
+                .Fn => |func| func,
+                else => |other| @compileError(name ++ ": expected a method, found " ++ @typeName(other)),
+            };
+
+            const ret_type = func.return_type.?;
+            blk: {
+                switch (ret.tag) {
+                    .none => {
+                        if (ret.tt == ret_type) break :blk;
+                        @compileError(
+                            name ++ ": expected return type of " ++ @typeName(ret.tt) ++ ", found " ++ @typeName(ret_type),
+                        );
+                    },
+                    .optional => {
+                        switch (@typeInfo(ret_type)) {
+                            .Optional => |ti| if (ti.child == ret.tt) break :blk,
+                            else => {},
+                        }
+                        @compileError(
+                            name ++ ": expected return type of ?" ++ @typeName(ret.tt) ++ ", found " ++ @typeName(ret_type),
+                        );
+                    },
+                    .error_union => {
+                        switch (@typeInfo(ret_type)) {
+                            .ErrorUnion => |ti| if (ti.payload == ret.tt) break :blk,
+                            else => {},
+                        }
+                        @compileError(
+                            name ++ ": expected return type of !" ++ @typeName(ret.tt) ++ ", found " ++ @typeName(ret_type),
+                        );
+                    },
+                }
+            }
+
+            if (func.args.len != params.len) {
+                @compileError(name ++ ": expected " ++ params.len ++ " parameters, found " ++ func.args.len);
+            }
+
+            inline for (params) |exp, i| {
+                const given = func.args[i].arg_type.?;
+                if (exp != given) {
+                    @compileError(
+                        name ++ ": expected param " ++ i ++ " of type " ++ @typeName(exp) ++ ", found " ++ @typeName(given),
+                    );
+                }
             }
         }
 
