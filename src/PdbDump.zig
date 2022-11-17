@@ -237,10 +237,10 @@ fn getAndPrintStreamName(
     }
 
     if (val.ctx.pdb_stream) |pdb_stream| {
-        var it = pdb_stream.named_stream_map.iterator();
-        while (it.next()) |name| {
-            if (pdb_stream.named_stream_map.get(name).? == val.index) {
-                return writer.print("Named Stream \"{s}\"", .{name});
+        var it = pdb_stream.named_stream_map.hash_table.iterator();
+        while (it.next()) |entry| {
+            if (entry.value == val.index) {
+                return writer.print("Named Stream \"{s}\"", .{pdb_stream.named_stream_map.getString(entry.key)});
             }
         }
     }
@@ -291,12 +291,12 @@ pub fn printPdbInfoStream(self: *const PdbDump, writer: anytype) !void {
 
     try writer.writeAll("  Named Streams\n");
 
-    var nsm_it = pdb_stream.named_stream_map.iterator();
-    while (nsm_it.next()) |name| {
-        const stream_index = pdb_stream.named_stream_map.get(name).?;
+    var it = pdb_stream.named_stream_map.hash_table.iterator();
+    while (it.next()) |entry| {
+        const name = pdb_stream.named_stream_map.getString(entry.key);
         try writer.print("    {s: <16}\n", .{name});
-        try writer.print("      {s: <16} {x}\n", .{ "Index", stream_index });
-        try writer.print("      {s: <16} {x}\n", .{ "Size (bytes)", self.stream_dir.getStreamSizes()[stream_index] });
+        try writer.print("      {s: <16} {x}\n", .{ "Index", entry.value });
+        try writer.print("      {s: <16} {x}\n", .{ "Size (bytes)", self.stream_dir.getStreamSizes()[entry.value] });
     }
 
     try writer.writeByte('\n');

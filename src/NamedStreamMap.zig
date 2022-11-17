@@ -2,6 +2,7 @@
 const NamedStreamMap = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const hash_table = @import("hash_table.zig");
 const mem = std.mem;
 
@@ -71,6 +72,11 @@ pub fn put(self: *NamedStreamMap, key: []const u8, value: u32) !void {
     gop.value_ptr.* = value;
 }
 
+pub fn getString(self: NamedStreamMap, off: u32) []const u8 {
+    assert(off < self.strtab.items.len);
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr) + off, 0);
+}
+
 pub fn serializedSize(self: NamedStreamMap) u32 {
     return @intCast(u32, @sizeOf(u32) + self.strtab.items.len + self.hash_table.serializedSize());
 }
@@ -95,20 +101,4 @@ pub fn write(self: NamedStreamMap, writer: anytype) !void {
     try writer.writeIntLittle(u32, @intCast(u32, self.strtab.items.len));
     try writer.writeAll(self.strtab.items);
     try self.hash_table.write(writer);
-}
-
-const Iterator = struct {
-    strtab: []const u8,
-    pos: usize = 0,
-
-    pub fn next(it: *Iterator) ?[]const u8 {
-        if (it.pos == it.strtab.len) return null;
-        const str = mem.sliceTo(@ptrCast([*:0]const u8, it.strtab.ptr + it.pos), 0);
-        it.pos += str.len + 1;
-        return str;
-    }
-};
-
-pub fn iterator(self: NamedStreamMap) Iterator {
-    return .{ .strtab = self.strtab.items };
 }

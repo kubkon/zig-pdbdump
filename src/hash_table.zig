@@ -308,10 +308,19 @@ pub fn HashTable(comptime Value: type, comptime Context: type) type {
             }
         }
 
-        const GetIndexResult = struct {
-            found_existing: bool,
-            index: u32,
+        pub const Iterator = struct {
+            table: *const Self,
+            iter: DynamicBitSetUnmanaged.Iterator(.{}),
+
+            pub fn next(it: *Iterator) ?Entry {
+                const index = it.iter.next() orelse return null;
+                return it.table.buckets.items[index];
+            }
         };
+
+        pub fn iterator(self: *const Self) Iterator {
+            return .{ .table = self, .iter = self.present.iterator(.{}) };
+        }
 
         /// If the key exists, returns index to the bucket holding the entry.
         /// Otherwise returns null.
