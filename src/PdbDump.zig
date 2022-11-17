@@ -18,7 +18,7 @@ data: []const u8,
 
 stream_dir: StreamDirectory,
 pdb_stream: ?PdbInfoStream = null,
-strtab: ?[]const u8 = null,
+pdb_strtab: ?PdbStringTableStream = null,
 
 const PdbInfoStream = struct {
     stream: MsfStream,
@@ -32,6 +32,14 @@ const PdbInfoStream = struct {
     fn getFeatures(self: @This()) []align(1) const pdb.PdbFeatureCode {
         const num_features = @divExact(self.stream.len - self.features_pos, @sizeOf(pdb.PdbFeatureCode));
         return @ptrCast([*]align(1) const pdb.PdbFeatureCode, self.stream.ptr + self.features_pos)[0..num_features];
+    }
+};
+
+const PdbStringTableStream = struct {
+    stream: MsfStream,
+
+    fn getHeader(self: *const @This()) pdb.PDBStringTableHeader {
+        return @ptrCast(*align(1) const pdb.PDBStringTableHeader, self.stream.ptr).*;
     }
 };
 
@@ -70,6 +78,23 @@ pub fn parse(gpa: Allocator, file: fs.File) !PdbDump {
         self.pdb_stream = pdb_stream;
     }
 
+    if (self.pdb_stream) |pdb_stream| {
+        if (pdb_stream.named_stream_map.get("/names")) |index| blk: {
+            const msf_stream = (try self.stream_dir.getStreamAlloc(self.gpa, index, .{
+                .data = self.data,
+                .block_size = self.getBlockSize(),
+            })) orelse break :blk;
+
+            log.warn("{x}", .{std.fmt.fmtSliceEscapeLower(msf_stream)});
+
+            var pdb_strtab = PdbStringTableStream{
+                .stream = msf_stream,
+            };
+
+            log.warn("{}", .{pdb_strtab.getHeader()});
+        }
+    }
+
     return self;
 }
 
@@ -80,8 +105,8 @@ pub fn deinit(self: *PdbDump) void {
         self.gpa.free(stream.stream);
         stream.named_stream_map.deinit();
     }
-    if (self.strtab) |strtab| {
-        self.gpa.free(strtab);
+    if (self.pdb_strtab) |*stream| {
+        self.gpa.free(stream.stream);
     }
 }
 

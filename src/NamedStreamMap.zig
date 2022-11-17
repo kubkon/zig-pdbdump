@@ -10,53 +10,65 @@ const HashTable = hash_table.HashTable;
 
 gpa: Allocator,
 strtab: std.ArrayListUnmanaged(u8) = .{},
-hash_table: HashTable(u32),
+hash_table: HashTable(u32, IndexContext) = .{},
+
+const IndexContext = struct {
+    strtab: []const u8,
+
+    pub fn hash(ctx: @This(), key: u32) u32 {
+        const slice = mem.sliceTo(@ptrCast([*:0]const u8, ctx.strtab.ptr) + key, 0);
+        // It is a bug not to truncate a valid u32 to u16.
+        return @truncate(u16, hash_table.hashStringV1(slice));
+    }
+
+    pub fn eql(ctx: @This(), key1: u32, key2: u32) bool {
+        _ = ctx;
+        return key1 == key2;
+    }
+};
+
+const IndexAdapter = struct {
+    strtab: []const u8,
+
+    pub fn hash(ctx: @This(), key: []const u8) u32 {
+        _ = ctx;
+        // It is a bug not to truncate a valid u32 to u16.
+        return @truncate(u16, hash_table.hashStringV1(key));
+    }
+
+    pub fn eql(ctx: @This(), key1: []const u8, key2: u32) bool {
+        const slice = mem.sliceTo(@ptrCast([*:0]const u8, ctx.strtab.ptr) + key2, 0);
+        return mem.eql(u8, key1, slice);
+    }
+};
 
 pub fn deinit(self: *NamedStreamMap) void {
     self.strtab.deinit(self.gpa);
     self.hash_table.deinit(self.gpa);
 }
 
-fn HashContext(comptime Self: type, comptime get_only: bool) type {
-    return struct {
-        // TODO fix this at the API level
-        map: if (get_only) Self else *Self,
-
-        pub fn hash(ctx: @This(), key: []const u8) u32 {
-            _ = ctx;
-            // It is a bug not to truncate a valid u32 to u16.
-            return @truncate(u16, hash_table.hashStringV1(key));
-        }
-
-        pub fn eql(ctx: @This(), key1: []const u8, key2: []const u8) bool {
-            _ = ctx;
-            return mem.eql(u8, key1, key2);
-        }
-
-        pub fn getKeyAdapted(ctx: @This(), offset: u32) ?[]const u8 {
-            if (offset > ctx.map.strtab.items.len) return null;
-            return mem.sliceTo(@ptrCast([*:0]u8, ctx.map.strtab.items.ptr + offset), 0);
-        }
-
-        pub fn putKeyAdapted(ctx: @This(), key: []const u8) error{OutOfMemory}!u32 {
-            if (comptime get_only) {
-                unreachable; // HashContext created with no intention to write
-            }
-            const adapted = @intCast(u32, ctx.map.strtab.items.len);
-            try ctx.map.strtab.ensureUnusedCapacity(ctx.map.gpa, key.len + 1);
-            ctx.map.strtab.appendSliceAssumeCapacity(key);
-            ctx.map.strtab.appendAssumeCapacity(0);
-            return adapted;
-        }
-    };
-}
-
 pub fn get(self: NamedStreamMap, key: []const u8) ?u32 {
-    return self.hash_table.get([]const u8, HashContext(NamedStreamMap, true), key, .{ .map = self });
+    return self.hash_table.get(key, IndexAdapter{ .strtab = self.strtab.items });
 }
 
 pub fn put(self: *NamedStreamMap, key: []const u8, value: u32) !void {
-    try self.hash_table.put([]const u8, HashContext(NamedStreamMap, false), key, value, .{ .map = self });
+    const gop = try self.hash_table.getOrPut(
+        key,
+        IndexAdapter{ .strtab = self.strtab.items },
+        IndexContext{ .strtab = self.strtab.items },
+    );
+    if (gop.found_existing) {
+        gop.value_ptr.* = value;
+        return;
+    }
+
+    const offset = @intCast(u32, self.strtab.items.len);
+    try self.strtab.ensureUnusedCapacity(self.gpa, key.len + 1);
+    self.strtab.appendSliceAssumeCapacity(key);
+    self.strtab.appendAssumeCapacity(0);
+
+    gop.key_ptr.* = offset;
+    gop.value_ptr.* = value;
 }
 
 pub fn serializedSize(self: NamedStreamMap) u32 {
@@ -74,7 +86,7 @@ pub fn read(gpa: Allocator, reader: anytype) !NamedStreamMap {
     const amt = try reader.readAll(map.strtab.items);
     if (amt != strtab_len) return error.InputOutput;
 
-    map.hash_table = try HashTable(u32).read(gpa, reader);
+    map.hash_table = try HashTable(u32, IndexContext).read(gpa, reader);
 
     return map;
 }

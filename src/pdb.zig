@@ -2,6 +2,7 @@ const std = @import("std");
 const pdb = std.pdb;
 
 pub const SuperBlock = pdb.SuperBlock;
+pub const PDBStringTableHeader = pdb.PDBStringTableHeader;
 
 pub const PdbStreamHeader = extern struct {
     /// See `PdbStreamVersion` enum
