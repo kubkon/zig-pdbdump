@@ -3,11 +3,11 @@ const NamedStreamMap = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
-const hash_table = @import("hash_table.zig");
+const hashStringV1 = @import("hash.zig").hashStringV1;
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
-const HashTable = hash_table.HashTable;
+const HashTable = @import("hash_table.zig").HashTable;
 
 gpa: Allocator,
 strtab: std.ArrayListUnmanaged(u8) = .{},
@@ -19,7 +19,7 @@ const IndexContext = struct {
     pub fn hash(ctx: @This(), key: u32) u32 {
         const slice = mem.sliceTo(@ptrCast([*:0]const u8, ctx.strtab.ptr) + key, 0);
         // It is a bug not to truncate a valid u32 to u16.
-        return @truncate(u16, hash_table.hashStringV1(slice));
+        return @truncate(u16, hashStringV1(slice));
     }
 
     pub fn eql(ctx: @This(), key1: u32, key2: u32) bool {
@@ -34,7 +34,7 @@ const IndexAdapter = struct {
     pub fn hash(ctx: @This(), key: []const u8) u32 {
         _ = ctx;
         // It is a bug not to truncate a valid u32 to u16.
-        return @truncate(u16, hash_table.hashStringV1(key));
+        return @truncate(u16, hashStringV1(key));
     }
 
     pub fn eql(ctx: @This(), key1: []const u8, key2: u32) bool {

@@ -64,4 +64,5 @@ fn printUsageWithHelp(stream: anytype, comptime params: []const clap.Param(clap.
 
 test {
     _ = @import("hash_table.zig");
+    _ = @import("hash_set.zig");
 }

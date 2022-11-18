@@ -12,6 +12,7 @@ const Allocator = mem.Allocator;
 const MsfStream = StreamDirectory.MsfStream;
 const NamedStreamMap = @import("NamedStreamMap.zig");
 const StreamDirectory = @import("StreamDirectory.zig");
+const StringTable = @import("StringTable.zig");
 
 gpa: Allocator,
 data: []const u8,
@@ -37,6 +38,7 @@ const PdbInfoStream = struct {
 
 const PdbStringTableStream = struct {
     stream: MsfStream,
+    strtab: StringTable,
 
     fn getHeader(self: *const @This()) pdb.PDBStringTableHeader {
         return @ptrCast(*align(1) const pdb.PDBStringTableHeader, self.stream.ptr).*;
@@ -85,13 +87,18 @@ pub fn parse(gpa: Allocator, file: fs.File) !PdbDump {
                 .block_size = self.getBlockSize(),
             })) orelse break :blk;
 
-            log.warn("{x}", .{std.fmt.fmtSliceEscapeLower(msf_stream)});
-
             var pdb_strtab = PdbStringTableStream{
                 .stream = msf_stream,
+                .strtab = undefined,
             };
 
-            log.warn("{}", .{pdb_strtab.getHeader()});
+            const header = pdb_strtab.getHeader();
+
+            var stream = std.io.fixedBufferStream(msf_stream);
+            try stream.seekBy(@sizeOf(pdb.PDBStringTableHeader));
+            const reader = stream.reader();
+
+            pdb_strtab.strtab = try StringTable.read(self.gpa, header.HashVersion, header.ByteSize, reader);
         }
     }
 
