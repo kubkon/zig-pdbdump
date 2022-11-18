@@ -124,8 +124,8 @@ pub fn HashSet(comptime Context: type) type {
         /// Calculates required number of bytes to serialize the HashSet
         /// to a byte stream.
         /// Use it to preallocate the output buffer.
-        pub fn serializedSize(self: Self) usize {
-            return @sizeOf(Header) + self.capacity() * @sizeOf(Key);
+        pub fn serializedSize(self: Self) u32 {
+            return @intCast(u32, @sizeOf(Header) + self.capacity() * @sizeOf(Key));
         }
 
         /// Reads the HashSet from an input stream.

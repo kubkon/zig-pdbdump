@@ -159,7 +159,7 @@ pub fn HashTable(comptime Value: type, comptime Context: type) type {
         /// Calculates required number of bytes to serialize the HashTable
         /// to a byte stream.
         /// Use it to preallocate the output buffer.
-        pub fn serializedSize(self: Self) usize {
+        pub fn serializedSize(self: Self) u32 {
             var size: usize = @sizeOf(Header);
 
             for (&[_]DynamicBitSetUnmanaged{ self.present, self.deleted }) |vec| {
@@ -171,7 +171,7 @@ pub fn HashTable(comptime Value: type, comptime Context: type) type {
 
             size += self.count() * @sizeOf(Entry);
 
-            return size;
+            return @intCast(u32, size);
         }
 
         /// Reads the HashTable from an input stream.

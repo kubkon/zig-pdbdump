@@ -68,14 +68,48 @@ pub fn read(allocator: Allocator, hash_version: u32, bytes_size: u32, reader: an
     return self;
 }
 
-pub fn getString(self: StringTable, off: u32) []const u8 {
+pub fn write(self: StringTable, writer: anytype) !void {
+    try writer.writeAll(self.bytes.items);
+    try self.lookup.write(writer);
+}
+
+pub fn bytesSize(self: StringTable) u32 {
+    return @intCast(u32, self.bytes.items.len);
+}
+
+pub fn serializedSize(self: StringTable) u32 {
+    return self.bytesSize() + self.lookup.serializedSize();
+}
+
+pub fn getByOffset(self: StringTable, off: u32) []const u8 {
     assert(off < self.bytes.items.len);
     return mem.sliceTo(@ptrCast([*:0]const u8, self.bytes.items.ptr) + off, 0);
 }
 
-pub fn getOffset(self: StringTable, name: []const u8) ?u32 {
+pub fn get(self: StringTable, name: []const u8) ?u32 {
     return self.lookup.get(name, IndexAdapter{
         .bytes = self.bytes.items,
         .hash_version = self.hash_version,
     });
+}
+
+pub fn put(self: *StringTable, name: []const u8) !void {
+    const gop = try self.lookup.getOrPut(
+        self.allocator,
+        name,
+        IndexAdapter{ .bytes = self.bytes.items },
+        IndexContext{ .bytes = self.bytes.items },
+    );
+    if (gop.found_existing) {
+        return;
+    }
+    gop.ptr.* = try self.addString(name);
+}
+
+fn addString(self: *StringTable, name: []const u8) !u32 {
+    const off = @intCast(u32, self.bytes.items.len);
+    try self.bytes.ensureUnusedCapacity(self.allocator, name.len + 1);
+    self.bytes.appendSliceAssumeCapacity(name);
+    self.bytes.appendAssumeCapacity(0);
+    return off;
 }
