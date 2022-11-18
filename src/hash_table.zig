@@ -42,8 +42,10 @@ pub fn HashTable(comptime Value: type, comptime Context: type) type {
             capacity: u32,
         };
 
+        pub const Key = u32;
+
         pub const Entry = extern struct {
-            key: u32,
+            key: Key,
             value: Value,
         };
 
@@ -81,7 +83,7 @@ pub fn HashTable(comptime Value: type, comptime Context: type) type {
 
         const GetOrPutResult = struct {
             found_existing: bool,
-            key_ptr: *u32,
+            key_ptr: *Key,
             value_ptr: *Value,
         };
 
