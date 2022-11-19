@@ -346,8 +346,8 @@ pub fn printPdbStringTableStream(self: *const PdbDump, writer: anytype) !void {
             });
 
             var padding: usize = 0;
-            while (padding < num_bytes_per_block - block_len) : (padding += 1) {
-                try writer.writeAll("  ");
+            while (padding < (num_bytes_per_block - block_len) * 2) : (padding += 1) {
+                try writer.writeByte(' ');
             }
 
             try writer.writeByte(' ');
