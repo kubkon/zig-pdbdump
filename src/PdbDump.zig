@@ -99,6 +99,8 @@ pub fn parse(gpa: Allocator, file: fs.File) !PdbDump {
             const reader = stream.reader();
 
             pdb_strtab.strtab = try StringTable.read(self.gpa, header.HashVersion, header.ByteSize, reader);
+
+            self.pdb_strtab = pdb_strtab;
         }
     }
 
@@ -264,8 +266,7 @@ fn fmtStreamName(self: *const PdbDump, index: u32) std.fmt.Formatter(getAndPrint
 
 pub fn printPdbInfoStream(self: *const PdbDump, writer: anytype) !void {
     const pdb_stream = self.pdb_stream orelse {
-        try writer.writeAll("No PDB Info Stream found.\n");
-        return;
+        return writer.writeAll("No PDB Info Stream found.\n");
     };
 
     try writer.writeAll("PDB Info Stream #1\n");
@@ -307,6 +308,98 @@ pub fn printPdbInfoStream(self: *const PdbDump, writer: anytype) !void {
     }
 
     try writer.writeByte('\n');
+}
+
+pub fn printPdbStringTableStream(self: *const PdbDump, writer: anytype) !void {
+    const pdb_strtab = self.pdb_strtab orelse {
+        return writer.writeAll("No PDB String Table Stream found.\n");
+    };
+
+    const stream_index = self.pdb_stream.?.named_stream_map.get("/names").?;
+    try writer.print("PDB String Table Stream #{x}\n", .{stream_index});
+
+    const header = pdb_strtab.getHeader();
+
+    inline for (@typeInfo(pdb.PDBStringTableHeader).Struct.fields) |field| {
+        const value = @field(header, field.name);
+        try writer.print("  {s: <16} {x}\n", .{ field.name, value });
+    }
+    try writer.writeByte('\n');
+    try writer.writeAll("Name Buffer\n");
+
+    const bytes = pdb_strtab.strtab.bytes.items;
+    const num_bytes_per_block = 4;
+    const num_blocks_per_line = 8;
+    var index: usize = 0;
+    while (index < bytes.len) {
+        const len = @min(num_blocks_per_line * num_bytes_per_block, bytes.len - index);
+        const slice = bytes[index..][0..len];
+
+        try writer.print("  {x:0>4}:  ", .{index});
+
+        var block: usize = 0;
+        const num_blocks = len / num_bytes_per_block + @boolToInt(len % num_bytes_per_block > 0);
+        while (block < num_blocks) : (block += 1) {
+            const block_len = @min(num_bytes_per_block, slice.len - block * num_bytes_per_block);
+            try writer.print("{x}", .{
+                std.fmt.fmtSliceHexUpper(slice[block * num_bytes_per_block ..][0..block_len]),
+            });
+
+            var padding: usize = 0;
+            while (padding < num_bytes_per_block - block_len) : (padding += 1) {
+                try writer.writeAll("  ");
+            }
+
+            try writer.writeByte(' ');
+        }
+
+        var block_padding: usize = 0;
+        while (block_padding < num_blocks_per_line - num_blocks) : (block_padding += 1) {
+            var padding: usize = 0;
+            while (padding < num_bytes_per_block * 2) : (padding += 1) {
+                try writer.writeByte(' ');
+            }
+            try writer.writeByte(' ');
+        }
+
+        try writer.print("|{s}|", .{fmtSliceEscape(slice)});
+
+        try writer.writeByte('\n');
+
+        index += len;
+    }
+
+    try writer.writeByte('\n');
+    try writer.writeAll("Hash Table\n");
+    try writer.print("  {s}: {x}\n", .{ "Bucket Count", pdb_strtab.strtab.lookup.capacity() });
+
+    for (pdb_strtab.strtab.lookup.buckets.items) |bucket, bucket_i| {
+        try writer.print("  {s}[{x}]: {x}\n", .{ "Bucket", bucket_i, bucket });
+    }
+
+    try writer.print("  {s}: {x}\n", .{ "Name Count", pdb_strtab.strtab.lookup.count() });
+}
+
+fn formatSliceEscape(
+    bytes: []const u8,
+    comptime fmt: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = fmt;
+    _ = options;
+
+    for (bytes) |c| {
+        if (std.ascii.isPrint(c)) {
+            try writer.writeByte(c);
+        } else if (c == 0) {
+            try writer.writeByte('.');
+        } else unreachable;
+    }
+}
+
+fn fmtSliceEscape(bytes: []const u8) std.fmt.Formatter(formatSliceEscape) {
+    return .{ .data = bytes };
 }
 
 fn getMsfSuperBlock(self: *const PdbDump) *align(1) const pdb.SuperBlock {

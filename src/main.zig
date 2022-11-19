@@ -16,6 +16,7 @@ pub fn main() !void {
         clap.parseParam("--msf-headers          Print MSF headers.") catch unreachable,
         clap.parseParam("--streams              Print stream directory.") catch unreachable,
         clap.parseParam("--info-stream          Print PDB Info Stream.") catch unreachable,
+        clap.parseParam("--string-table         Print PDB String Table.") catch unreachable,
         clap.parseParam("<FILE>") catch unreachable,
     };
 
@@ -52,6 +53,9 @@ pub fn main() !void {
     }
     if (res.args.@"info-stream" or res.args.all) {
         try pdb.printPdbInfoStream(stdout);
+    }
+    if (res.args.@"string-table" or res.args.all) {
+        try pdb.printPdbStringTableStream(stdout);
     }
 }
 
