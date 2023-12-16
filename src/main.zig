@@ -30,7 +30,7 @@ pub fn main() !void {
     });
     defer res.deinit();
 
-    if (res.args.help) {
+    if (res.args.help > 0) {
         return printUsageWithHelp(stderr, params[0..]);
     }
 
@@ -45,16 +45,16 @@ pub fn main() !void {
     var pdb = try PdbDump.parse(gpa.allocator(), file);
     defer pdb.deinit();
 
-    if (res.args.@"msf-headers" or res.args.all) {
+    if (res.args.@"msf-headers" > 0 or res.args.all > 0) {
         try pdb.printMsfHeaders(stdout);
     }
-    if (res.args.streams or res.args.all) {
+    if (res.args.streams > 0 or res.args.all > 0) {
         try pdb.printStreamDirectory(stdout);
     }
-    if (res.args.@"info-stream" or res.args.all) {
+    if (res.args.@"info-stream" > 0 or res.args.all > 0) {
         try pdb.printPdbInfoStream(stdout);
     }
-    if (res.args.@"string-table" or res.args.all) {
+    if (res.args.@"string-table" > 0 or res.args.all > 0) {
         try pdb.printPdbStringTableStream(stdout);
     }
 }

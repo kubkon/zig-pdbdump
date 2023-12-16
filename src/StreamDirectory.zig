@@ -9,7 +9,7 @@ const Allocator = mem.Allocator;
 
 stream: MsfStream,
 
-const invalid_stream: u32 = @bitCast(u32, @as(i32, -1));
+const invalid_stream: u32 = @bitCast(@as(i32, -1));
 
 pub const MsfStream = []const u8;
 
@@ -25,7 +25,7 @@ pub fn parse(
 ) error{OutOfMemory}!StreamDirectory {
     const pos = super_block.BlockMapAddr * super_block.BlockSize;
     const num = ceil(u32, super_block.NumDirectoryBytes, super_block.BlockSize);
-    const blocks = @ptrCast([*]align(1) const u32, data.ptr + pos)[0..num];
+    const blocks = @as([*]align(1) const u32, @ptrCast(data.ptr + pos))[0..num];
 
     const buffer = try gpa.alloc(u8, super_block.NumDirectoryBytes);
 
@@ -42,12 +42,12 @@ pub fn deinit(dir: StreamDirectory, gpa: Allocator) void {
 }
 
 pub fn getNumStreams(dir: StreamDirectory) u32 {
-    return @ptrCast(*align(1) const u32, dir.stream.ptr).*;
+    return @as(*align(1) const u32, @ptrCast(dir.stream.ptr)).*;
 }
 
 pub fn getStreamSizes(dir: StreamDirectory) []align(1) const u32 {
     const num_streams = dir.getNumStreams();
-    return @ptrCast([*]align(1) const u32, dir.stream.ptr + @sizeOf(u32))[0..num_streams];
+    return @as([*]align(1) const u32, @ptrCast(dir.stream.ptr + @sizeOf(u32)))[0..num_streams];
 }
 
 pub fn getStreamBlocks(dir: StreamDirectory, index: usize, ctx: Context) ?[]align(1) const u32 {
@@ -72,7 +72,7 @@ pub fn getStreamBlocks(dir: StreamDirectory, index: usize, ctx: Context) ?[]alig
     };
 
     const pos = @sizeOf(u32) * (stream_sizes.len + 1 + total_prev_num_blocks);
-    return @ptrCast([*]align(1) const u32, dir.stream.ptr + pos)[0..num_blocks];
+    return @as([*]align(1) const u32, @ptrCast(dir.stream.ptr + pos))[0..num_blocks];
 }
 
 pub fn getStreamAlloc(dir: StreamDirectory, gpa: Allocator, index: usize, ctx: Context) error{OutOfMemory}!?MsfStream {
@@ -90,9 +90,9 @@ pub fn stitchBlocks(blocks: []align(1) const u32, buffer: []u8, ctx: Context) vo
     // Stitch together blocks belonging to the MsfStream.
     var out = buffer;
     var block_index: usize = 0;
-    var init_pos = blocks[block_index] * ctx.block_size;
+    const init_pos = blocks[block_index] * ctx.block_size;
     const init_len = @min(buffer.len, ctx.block_size);
-    mem.copy(u8, out, ctx.data[init_pos..][0..init_len]);
+    @memcpy(out[0..init_len], ctx.data[init_pos..][0..init_len]);
     out = out[init_len..];
 
     var leftover = buffer.len - init_len;
@@ -100,12 +100,12 @@ pub fn stitchBlocks(blocks: []align(1) const u32, buffer: []u8, ctx: Context) vo
         block_index += 1;
         const next_pos = blocks[block_index] * ctx.block_size;
         const copy_len = @min(leftover, ctx.block_size);
-        mem.copy(u8, out, ctx.data[next_pos..][0..copy_len]);
+        @memcpy(out[0..copy_len], ctx.data[next_pos..][0..copy_len]);
         out = out[copy_len..];
         leftover -= copy_len;
     }
 }
 
 inline fn ceil(comptime T: type, num: T, div: T) T {
-    return @divTrunc(num, div) + @boolToInt(@rem(num, div) > 0);
+    return @divTrunc(num, div) + @intFromBool(@rem(num, div) > 0);
 }

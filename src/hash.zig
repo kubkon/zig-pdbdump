@@ -5,7 +5,7 @@
 pub fn hashStringV1(str: []const u8) u32 {
     var result: u32 = 0;
 
-    const longs = @ptrCast([*]align(1) const u32, str.ptr)[0..@divTrunc(str.len, 4)];
+    const longs = @as([*]align(1) const u32, @ptrCast(str.ptr))[0..@divTrunc(str.len, 4)];
     for (longs) |val| {
         result ^= val;
     }
@@ -14,7 +14,7 @@ pub fn hashStringV1(str: []const u8) u32 {
     var remainder_size = str.len % 4;
 
     if (remainder_size >= 2) {
-        const val = @ptrCast(*align(1) const u16, str.ptr + remainder_pos).*;
+        const val = @as(*align(1) const u16, @ptrCast(str.ptr + remainder_pos)).*;
         result ^= val;
         remainder_pos += 2;
         remainder_size -= 2;
@@ -37,7 +37,7 @@ pub fn hashStringV1(str: []const u8) u32 {
 pub fn hashStringV2(str: []const u8) u32 {
     var result: u32 = 0xb170a1bf;
 
-    const items = @ptrCast([*]align(1) const u32, str.ptr)[0..@divTrunc(str.len, @sizeOf(u32))];
+    const items = @as([*]align(1) const u32, @ptrCast(str.ptr))[0..@divTrunc(str.len, @sizeOf(u32))];
     for (items) |item| {
         result +%= item;
         result +%= (result << 10);
