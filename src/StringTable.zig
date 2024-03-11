@@ -19,9 +19,9 @@ const IndexContext = struct {
     hash_version: u32,
 
     pub fn hash(ctx: @This(), key: u32) u32 {
-        const slice = mem.sliceTo(@ptrCast([*:0]const u8, ctx.bytes.ptr) + key, 0);
+        const slice = mem.sliceTo(@as([*:0]const u8, @ptrCast(ctx.bytes.ptr)) + key, 0);
         switch (ctx.hash_version) {
-            1 => return @truncate(u16, hash_functions.hashStringV1(slice)),
+            1 => return @as(u16, @truncate(hash_functions.hashStringV1(slice))),
             2 => return hash_functions.hashStringV2(slice),
             else => unreachable, // unsupported hash version
         }
@@ -39,14 +39,14 @@ const IndexAdapter = struct {
 
     pub fn hash(ctx: @This(), key: []const u8) u32 {
         switch (ctx.hash_version) {
-            1 => return @truncate(u16, hash_functions.hashStringV1(key)),
+            1 => return @as(u16, @truncate(hash_functions.hashStringV1(key))),
             2 => return hash_functions.hashStringV2(key),
             else => unreachable, // unsupported hash version
         }
     }
 
     pub fn eql(ctx: @This(), key1: []const u8, key2: u32) bool {
-        const slice = mem.sliceTo(@ptrCast([*:0]const u8, ctx.bytes.ptr) + key2, 0);
+        const slice = mem.sliceTo(@as([*:0]const u8, @ptrCast(ctx.bytes.ptr)) + key2, 0);
         return mem.eql(u8, key1, slice);
     }
 };
@@ -74,7 +74,7 @@ pub fn write(self: StringTable, writer: anytype) !void {
 }
 
 pub fn bytesSize(self: StringTable) u32 {
-    return @intCast(u32, self.bytes.items.len);
+    return @intCast(self.bytes.items.len);
 }
 
 pub fn serializedSize(self: StringTable) u32 {
@@ -83,7 +83,7 @@ pub fn serializedSize(self: StringTable) u32 {
 
 pub fn getByOffset(self: StringTable, off: u32) []const u8 {
     assert(off < self.bytes.items.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.bytes.items.ptr) + off, 0);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.bytes.items.ptr)) + off, 0);
 }
 
 pub fn get(self: StringTable, name: []const u8) ?u32 {
@@ -107,7 +107,7 @@ pub fn put(self: *StringTable, name: []const u8) !void {
 }
 
 fn addString(self: *StringTable, name: []const u8) !u32 {
-    const off = @intCast(u32, self.bytes.items.len);
+    const off: u32 = @intCast(self.bytes.items.len);
     try self.bytes.ensureUnusedCapacity(self.allocator, name.len + 1);
     self.bytes.appendSliceAssumeCapacity(name);
     self.bytes.appendAssumeCapacity(0);

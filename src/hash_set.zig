@@ -125,12 +125,12 @@ pub fn HashSet(comptime Context: type) type {
         /// to a byte stream.
         /// Use it to preallocate the output buffer.
         pub fn serializedSize(self: Self) u32 {
-            return @intCast(u32, @sizeOf(Header) + self.capacity() * @sizeOf(Key));
+            return @intCast(@sizeOf(Header) + self.capacity() * @sizeOf(Key));
         }
 
         /// Reads the HashSet from an input stream.
         pub fn read(allocator: Allocator, reader: anytype) !Self {
-            const cap = try reader.readIntLittle(u32);
+            const cap = try reader.readInt(u32, .little);
 
             var self = Self{ .header = .{
                 .size = undefined,
@@ -140,7 +140,7 @@ pub fn HashSet(comptime Context: type) type {
 
             var i: u32 = 0;
             while (i < cap) : (i += 1) {
-                const off = try reader.readIntLittle(u32);
+                const off = try reader.readInt(u32, .little);
                 const is_set = off > 0;
                 self.buckets.items[i] = off;
                 if (is_set) {
@@ -148,7 +148,7 @@ pub fn HashSet(comptime Context: type) type {
                 }
             }
 
-            const size = try reader.readIntLittle(u32);
+            const size = try reader.readInt(u32, .little);
             self.header.size = size;
 
             if (size != self.present.count()) {
@@ -230,7 +230,7 @@ pub fn HashSet(comptime Context: type) type {
                 .capacity = new_capacity,
             };
             try self.buckets.resize(allocator, self.capacity());
-            mem.set(Key, self.buckets.items, 0);
+            @memset(self.buckets.items, 0);
             self.present = try DynamicBitSetUnmanaged.initEmpty(allocator, self.capacity());
         }
 
@@ -249,11 +249,11 @@ pub fn HashSet(comptime Context: type) type {
         }
 
         fn calcNextCapacityValueAtLeast(min_cap: u32) u32 {
-            comptime var cap: u32 = 1;
-            inline while (true) {
+            var cap: u32 = 1;
+            while (true) {
                 if (cap > min_cap) return cap;
-                comptime var next_cap = @as(u64, cap) * 3 / 2 + 1;
-                cap = comptime math.cast(u32, next_cap) orelse return cap;
+                const next_cap = @as(u64, cap) * 3 / 2 + 1;
+                cap = math.cast(u32, next_cap) orelse return cap;
             }
         }
     };
@@ -263,7 +263,7 @@ const IndexContext = struct {
     bytes: []const u8,
 
     pub fn hash(ctx: @This(), key: u32) u32 {
-        const slice = mem.sliceTo(@ptrCast([*:0]const u8, ctx.bytes.ptr) + key, 0);
+        const slice = mem.sliceTo(@as([*:0]const u8, @ptrCast(ctx.bytes.ptr)) + key, 0);
         return hashStringV1(slice);
     }
 
@@ -282,13 +282,13 @@ const IndexAdapter = struct {
     }
 
     pub fn eql(ctx: @This(), key1: []const u8, key2: u32) bool {
-        const slice = mem.sliceTo(@ptrCast([*:0]const u8, ctx.bytes.ptr) + key2, 0);
+        const slice = mem.sliceTo(@as([*:0]const u8, @ptrCast(ctx.bytes.ptr)) + key2, 0);
         return mem.eql(u8, key1, slice);
     }
 };
 
 fn addStringToStrtab(strtab: *std.ArrayList(u8), bytes: []const u8) !u32 {
-    const offset = @intCast(u32, strtab.items.len);
+    const offset: u32 = @intCast(strtab.items.len);
     try strtab.ensureUnusedCapacity(bytes.len + 1);
     strtab.appendSliceAssumeCapacity(bytes);
     strtab.appendAssumeCapacity(0);
@@ -305,7 +305,7 @@ const TestWrapper = struct {
 
     fn getString(self: @This(), off: u32) []const u8 {
         assert(off < self.strtab.items.len);
-        return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr) + off, 0);
+        return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr)) + off, 0);
     }
 
     fn get(self: @This(), key: []const u8) ?u32 {

@@ -17,9 +17,9 @@ const IndexContext = struct {
     strtab: []const u8,
 
     pub fn hash(ctx: @This(), key: u32) u32 {
-        const slice = mem.sliceTo(@ptrCast([*:0]const u8, ctx.strtab.ptr) + key, 0);
+        const slice = mem.sliceTo(@as([*:0]const u8, @ptrCast(ctx.strtab.ptr)) + key, 0);
         // It is a bug not to truncate a valid u32 to u16.
-        return @truncate(u16, hashStringV1(slice));
+        return @as(u16, @truncate(hashStringV1(slice)));
     }
 
     pub fn eql(ctx: @This(), key1: u32, key2: u32) bool {
@@ -34,11 +34,11 @@ const IndexAdapter = struct {
     pub fn hash(ctx: @This(), key: []const u8) u32 {
         _ = ctx;
         // It is a bug not to truncate a valid u32 to u16.
-        return @truncate(u16, hashStringV1(key));
+        return @as(u16, @truncate(hashStringV1(key)));
     }
 
     pub fn eql(ctx: @This(), key1: []const u8, key2: u32) bool {
-        const slice = mem.sliceTo(@ptrCast([*:0]const u8, ctx.strtab.ptr) + key2, 0);
+        const slice = mem.sliceTo(@as([*:0]const u8, @ptrCast(ctx.strtab.ptr)) + key2, 0);
         return mem.eql(u8, key1, slice);
     }
 };
@@ -63,7 +63,7 @@ pub fn put(self: *NamedStreamMap, key: []const u8, value: u32) !void {
         return;
     }
 
-    const offset = @intCast(u32, self.strtab.items.len);
+    const offset: u32 = @intCast(self.strtab.items.len);
     try self.strtab.ensureUnusedCapacity(self.gpa, key.len + 1);
     self.strtab.appendSliceAssumeCapacity(key);
     self.strtab.appendAssumeCapacity(0);
@@ -74,11 +74,11 @@ pub fn put(self: *NamedStreamMap, key: []const u8, value: u32) !void {
 
 pub fn getString(self: NamedStreamMap, off: u32) []const u8 {
     assert(off < self.strtab.items.len);
-    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr) + off, 0);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr)) + off, 0);
 }
 
 pub fn serializedSize(self: NamedStreamMap) u32 {
-    return @intCast(u32, @sizeOf(u32) + self.strtab.items.len + self.hash_table.serializedSize());
+    return @intCast(@sizeOf(u32) + self.strtab.items.len + self.hash_table.serializedSize());
 }
 
 pub fn read(gpa: Allocator, reader: anytype) !NamedStreamMap {
@@ -87,7 +87,7 @@ pub fn read(gpa: Allocator, reader: anytype) !NamedStreamMap {
         .hash_table = undefined,
     };
 
-    const strtab_len = try reader.readIntLittle(u32);
+    const strtab_len = try reader.readInt(u32, .little);
     try map.strtab.resize(gpa, strtab_len);
     const amt = try reader.readAll(map.strtab.items);
     if (amt != strtab_len) return error.InputOutput;
@@ -98,7 +98,7 @@ pub fn read(gpa: Allocator, reader: anytype) !NamedStreamMap {
 }
 
 pub fn write(self: NamedStreamMap, writer: anytype) !void {
-    try writer.writeIntLittle(u32, @intCast(u32, self.strtab.items.len));
+    try writer.writeInt(u32, @intCast(self.strtab.items.len), .little);
     try writer.writeAll(self.strtab.items);
     try self.hash_table.write(writer);
 }

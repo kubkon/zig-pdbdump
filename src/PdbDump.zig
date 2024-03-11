@@ -27,12 +27,12 @@ const PdbInfoStream = struct {
     features_pos: u32,
 
     fn getHeader(self: *const @This()) *align(1) const pdb.PdbStreamHeader {
-        return @ptrCast(*align(1) const pdb.PdbStreamHeader, self.stream.ptr);
+        return @ptrCast(self.stream.ptr);
     }
 
     fn getFeatures(self: @This()) []align(1) const pdb.PdbFeatureCode {
         const num_features = @divExact(self.stream.len - self.features_pos, @sizeOf(pdb.PdbFeatureCode));
-        return @ptrCast([*]align(1) const pdb.PdbFeatureCode, self.stream.ptr + self.features_pos)[0..num_features];
+        return (@as([*]align(1) const pdb.PdbFeatureCode, @ptrCast(self.stream.ptr)) + self.features_pos)[0..num_features];
     }
 };
 
@@ -41,7 +41,7 @@ const PdbStringTableStream = struct {
     strtab: StringTable,
 
     fn getHeader(self: *const @This()) pdb.PDBStringTableHeader {
-        return @ptrCast(*align(1) const pdb.PDBStringTableHeader, self.stream.ptr).*;
+        return (@as(*align(1) const pdb.PDBStringTableHeader, @ptrCast(self.stream.ptr))).*;
     }
 };
 
@@ -75,7 +75,7 @@ pub fn parse(gpa: Allocator, file: fs.File) !PdbDump {
         _ = try reader.readStruct(pdb.PdbStreamHeader);
 
         pdb_stream.named_stream_map = try NamedStreamMap.read(self.gpa, reader);
-        pdb_stream.features_pos = @intCast(u32, creader.bytes_read);
+        pdb_stream.features_pos = @intCast(creader.bytes_read);
 
         self.pdb_stream = pdb_stream;
     }
@@ -154,15 +154,15 @@ pub fn printMsfHeaders(self: *PdbDump, writer: anytype) !void {
         const index = (fb_map_it.count - 1) * super_block.BlockSize + super_block.FreeBlockMapBlock;
         try writer.print("FreeBlockMap #0x{x}\n", .{index});
 
-        var state: enum { free, taken } = if (@truncate(u1, block[0]) == 1) .free else .taken;
+        var state: enum { free, taken } = if (@as(u1, @truncate(block[0])) == 1) .free else .taken;
         var start_block_index: u32 = 0;
         var bit_count: u32 = 0;
         const total_block_count: u32 = 8 * super_block.BlockSize;
         while (bit_count < total_block_count) : (bit_count += 1) {
             const block_index = bit_count;
             const byte_index = @divTrunc(bit_count, 8);
-            const shift = @intCast(u3, @mod(bit_count, 8));
-            const free = @truncate(u1, block[byte_index] >> shift) == 1;
+            const shift: u3 = @intCast(@mod(bit_count, 8));
+            const free = @as(u1, @truncate(block[byte_index] >> shift)) == 1;
 
             switch (state) {
                 .free => if (!free) {
@@ -211,7 +211,7 @@ pub fn printStreamDirectory(self: *const PdbDump, writer: anytype) !void {
         }).?;
 
         try writer.writeAll("      Blocks:");
-        for (blocks) |block, block_i| {
+        for (blocks, 0..) |block, block_i| {
             if (block_i % 20 == 0) {
                 try writer.writeAll("\n        ");
             }
@@ -338,7 +338,7 @@ pub fn printPdbStringTableStream(self: *const PdbDump, writer: anytype) !void {
         try writer.print("  {x:0>4}:  ", .{index});
 
         var block: usize = 0;
-        const num_blocks = len / num_bytes_per_block + @boolToInt(len % num_bytes_per_block > 0);
+        const num_blocks = len / num_bytes_per_block + @intFromBool(len % num_bytes_per_block > 0);
         while (block < num_blocks) : (block += 1) {
             const block_len = @min(num_bytes_per_block, slice.len - block * num_bytes_per_block);
             try writer.print("{x}", .{
@@ -373,7 +373,7 @@ pub fn printPdbStringTableStream(self: *const PdbDump, writer: anytype) !void {
     try writer.writeAll("Hash Table\n");
     try writer.print("  {s}: {x}\n", .{ "Bucket Count", pdb_strtab.strtab.lookup.capacity() });
 
-    for (pdb_strtab.strtab.lookup.buckets.items) |bucket, bucket_i| {
+    for (pdb_strtab.strtab.lookup.buckets.items, 0..) |bucket, bucket_i| {
         try writer.print("  {s}[{x}]: {x}\n", .{ "Bucket", bucket_i, bucket });
     }
 
@@ -403,7 +403,7 @@ fn fmtSliceEscape(bytes: []const u8) std.fmt.Formatter(formatSliceEscape) {
 }
 
 fn getMsfSuperBlock(self: *const PdbDump) *align(1) const pdb.SuperBlock {
-    return @ptrCast(*align(1) const pdb.SuperBlock, self.data.ptr);
+    return @ptrCast(self.data.ptr);
 }
 
 fn getBlockSize(self: PdbDump) u32 {

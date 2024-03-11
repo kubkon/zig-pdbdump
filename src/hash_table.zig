@@ -173,7 +173,7 @@ pub fn HashTable(comptime Value: type, comptime Context: type) type {
 
             size += self.count() * @sizeOf(Entry);
 
-            return @intCast(u32, size);
+            return @intCast(size);
         }
 
         /// Reads the HashTable from an input stream.
@@ -228,21 +228,21 @@ pub fn HashTable(comptime Value: type, comptime Context: type) type {
         /// HashTable is serialized according to the PDB spec found at:
         /// https://llvm.org/docs/PDB/HashTable.html
         pub fn write(self: Self, writer: anytype) !void {
-            try writer.writeAll(@ptrCast([*]const u8, &self.header)[0..@sizeOf(Header)]);
+            try writer.writeAll(@as([*]const u8, @ptrCast(&self.header))[0..@sizeOf(Header)]);
 
             for (&[_]DynamicBitSetUnmanaged{ self.present, self.deleted }) |vec| {
                 // Calculate number of words for the bit vector
                 const present_num_words: u32 = if (findLastSet(vec)) |index|
-                    @intCast(u32, numMasks(u32, index + 1))
+                    @intCast(numMasks(u32, index + 1))
                 else
                     0;
-                try writer.writeIntLittle(u32, present_num_words);
+                try writer.writeInt(u32, present_num_words, .little);
 
                 // Serialize the sequence of bitvector's masks
                 if (present_num_words > 0) {
-                    const present_words = @ptrCast([*]const u32, vec.masks)[0..present_num_words];
+                    const present_words: []const u32 = @as([*]const u32, @ptrCast(vec.masks))[0..present_num_words];
                     for (present_words) |word| {
-                        try writer.writeIntLittle(u32, word);
+                        try writer.writeInt(u32, word, .little);
                     }
                 }
             }
@@ -251,8 +251,8 @@ pub fn HashTable(comptime Value: type, comptime Context: type) type {
             var it = self.present.iterator(.{});
             while (it.next()) |index| {
                 const entry = self.buckets.items[index];
-                try writer.writeIntLittle(u32, entry.key);
-                try writer.writeAll(@ptrCast([*]const u8, &entry.value)[0..@sizeOf(Value)]);
+                try writer.writeInt(u32, entry.key, .little);
+                try writer.writeAll(@as([*]const u8, @ptrCast(&entry.value))[0..@sizeOf(Value)]);
             }
         }
 
@@ -360,13 +360,13 @@ fn intersects(lhs: DynamicBitSetUnmanaged, rhs: DynamicBitSetUnmanaged) bool {
 }
 
 fn readBitSet(comptime Word: type, allocator: Allocator, reader: anytype) !DynamicBitSetUnmanaged {
-    const num_words = try reader.readIntLittle(Word);
+    const num_words = try reader.readInt(Word, .little);
     const bit_length = num_words * @bitSizeOf(Word);
     var bitset = try DynamicBitSetUnmanaged.initEmpty(allocator, bit_length);
 
     var i: usize = 0;
     while (i < num_words) : (i += 1) {
-        const word = try reader.readIntLittle(Word);
+        const word = try reader.readInt(Word, .little);
         var index: std.math.Log2Int(Word) = 0;
         while (index < @bitSizeOf(Word) - 1) : (index += 1) {
             if ((word & (@as(Word, 1) << index)) != 0) {
@@ -452,9 +452,9 @@ const IndexContext = struct {
     strtab: []const u8,
 
     pub fn hash(ctx: @This(), key: u32) u32 {
-        const slice = mem.sliceTo(@ptrCast([*:0]const u8, ctx.strtab.ptr) + key, 0);
+        const slice = mem.sliceTo(@as([*:0]const u8, @ptrCast(ctx.strtab.ptr)) + key, 0);
         // It is a bug not to truncate a valid u32 to u16.
-        return @truncate(u16, hashStringV1(slice));
+        return @as(u16, @truncate(hashStringV1(slice)));
     }
 
     pub fn eql(ctx: @This(), key1: u32, key2: u32) bool {
@@ -469,17 +469,17 @@ const IndexAdapter = struct {
     pub fn hash(ctx: @This(), key: []const u8) u32 {
         _ = ctx;
         // It is a bug not to truncate a valid u32 to u16.
-        return @truncate(u16, hashStringV1(key));
+        return @as(u16, @truncate(hashStringV1(key)));
     }
 
     pub fn eql(ctx: @This(), key1: []const u8, key2: u32) bool {
-        const slice = mem.sliceTo(@ptrCast([*:0]const u8, ctx.strtab.ptr) + key2, 0);
+        const slice = mem.sliceTo(@as([*:0]const u8, @ptrCast(ctx.strtab.ptr)) + key2, 0);
         return mem.eql(u8, key1, slice);
     }
 };
 
 fn addStringToStrtab(strtab: *std.ArrayList(u8), bytes: []const u8) !u32 {
-    const offset = @intCast(u32, strtab.items.len);
+    const offset: u32 = @intCast(strtab.items.len);
     try strtab.ensureUnusedCapacity(bytes.len + 1);
     strtab.appendSliceAssumeCapacity(bytes);
     strtab.appendAssumeCapacity(0);
